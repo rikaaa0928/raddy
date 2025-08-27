@@ -42,7 +42,6 @@ pub struct Proxy {
 pub struct ParsedUpstream {
     pub host: String,
     pub port: u16,
-    pub scheme: String,
     pub use_tls: bool,
 }
 
@@ -76,7 +75,6 @@ impl Proxy {
         Ok(ParsedUpstream {
             host,
             port,
-            scheme: parsed.scheme().to_string(),
             use_tls,
         })
     }
