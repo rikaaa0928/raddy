@@ -1,0 +1,24 @@
+[package]
+name = "raddy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pingora = { version = "0.6.0", features = ["lb", "proxy", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+async-trait = "0.1.89"
+log = "0.4.27"
+thiserror = "1.0.69"
+clap = { version = "4.5.4", features = ["derive"] }
+env_logger = "0.11.8"
+url = "2.5"
+regex = "1.0"
+rustls = "0.21"
+tokio = { version = "1", features = ["full"] }
+
+[dependencies.rustls-acme]
+version = "0.10.0"
+features = ["tokio"]
+
+

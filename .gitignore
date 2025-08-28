@@ -3,4 +3,4 @@
 .vscode
 .claude
 .gemini
-*.toml
+raddy.toml
