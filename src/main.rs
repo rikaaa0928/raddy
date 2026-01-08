@@ -56,6 +56,13 @@ fn main() {
         info!("Initializing HTTP listener on {}", addr);
         let proxy_service = ProxyService::new(config.clone(), false);
         let mut http_proxy = http_proxy_service(&server.configuration, proxy_service);
+        
+        let mut options = pingora::apps::HttpServerOptions::default();
+        options.h2c = true;
+        http_proxy.app_logic_mut().map(|logic| {
+             logic.server_options = Some(options);
+        });
+
         http_proxy.add_tcp(&addr);
         server.add_service(http_proxy);
     }
