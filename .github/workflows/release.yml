@@ -82,7 +82,7 @@ jobs:
         shell: powershell
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path raddy.exe -DestinationPath ..\..\.. ${{ matrix.archive_name }}
+          Compress-Archive -Path raddy.exe -DestinationPath ..\..\..\${{ matrix.archive_name }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
