@@ -11,6 +11,11 @@ use config::Config;
 use proxy::ProxyService;
 
 fn main() {
+    // Install rustls crypto provider (ring) before any TLS operations
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
