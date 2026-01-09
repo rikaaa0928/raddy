@@ -32,10 +32,45 @@ pub struct ListenConfig {
 /// TLS configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
-    /// Path to certificate file
-    pub cert_path: String,
-    /// Path to key file
-    pub key_path: String,
+    /// Path to certificate file (optional if using ACME)
+    pub cert_path: Option<String>,
+    /// Path to key file (optional if using ACME)
+    pub key_path: Option<String>,
+    /// ACME automatic certificate configuration
+    pub acme: Option<AcmeConfig>,
+}
+
+/// ACME automatic certificate configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeConfig {
+    /// Contact email for ACME account (required)
+    pub email: String,
+    /// Domain names to request certificates for
+    pub domains: Vec<String>,
+    /// ACME directory URL (defaults to Let's Encrypt production)
+    #[serde(default = "default_acme_directory")]
+    pub directory_url: String,
+    /// Directory to store certificates
+    #[serde(default = "default_cert_dir")]
+    pub cert_dir: String,
+    /// Days before expiration to renew certificate
+    #[serde(default = "default_renew_before_days")]
+    pub renew_before_days: u32,
+    /// Use Let's Encrypt staging environment (for testing)
+    #[serde(default)]
+    pub staging: bool,
+}
+
+fn default_acme_directory() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn default_cert_dir() -> String {
+    "./certs".to_string()
+}
+
+fn default_renew_before_days() -> u32 {
+    7
 }
 
 /// Route configuration for matching requests

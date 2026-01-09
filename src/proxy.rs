@@ -7,6 +7,7 @@ use pingora::upstreams::peer::HttpPeer;
 use std::sync::Arc;
 use url::Url;
 
+use crate::acme::ChallengeStore;
 use crate::config::{Config, Protocol, RouteConfig};
 
 /// Proxy service that handles HTTP requests and routes them to upstream servers
@@ -14,12 +15,13 @@ use crate::config::{Config, Protocol, RouteConfig};
 pub struct ProxyService {
     config: Arc<Config>,
     is_tls: bool,
+    challenge_store: Arc<ChallengeStore>,
 }
 
 impl ProxyService {
     /// Create a new proxy service with the given configuration
-    pub fn new(config: Arc<Config>, is_tls: bool) -> Self {
-        Self { config, is_tls }
+    pub fn new(config: Arc<Config>, is_tls: bool, challenge_store: Arc<ChallengeStore>) -> Self {
+        Self { config, is_tls, challenge_store }
     }
 
     /// Parse upstream URL and return host, port, and whether to use TLS
@@ -77,6 +79,28 @@ impl ProxyHttp for ProxyService {
         ctx: &mut Self::CTX,
     ) -> Result<bool, Box<pingora::Error>> {
         let req_header = session.req_header();
+        let path = req_header.uri.path();
+
+        // Handle ACME HTTP-01 challenge
+        if path.starts_with("/.well-known/acme-challenge/") {
+            let token = path.trim_start_matches("/.well-known/acme-challenge/");
+            info!("ACME HTTP-01 challenge request for token: {}", token);
+            
+            if let Some(key_auth) = self.challenge_store.get(token).await {
+                info!("Responding to ACME challenge with key authorization");
+                let mut header = pingora::http::ResponseHeader::build(200, Some(2))?;
+                header.insert_header("Content-Type", "text/plain")?;
+                
+                session.write_response_header(Box::new(header), false).await?;
+                session.write_response_body(Some(key_auth.into()), true).await?;
+                return Ok(true); // Request handled
+            } else {
+                warn!("ACME challenge token not found: {}", token);
+                let header = pingora::http::ResponseHeader::build(404, Some(1))?;
+                session.write_response_header(Box::new(header), true).await?;
+                return Ok(true); // Request handled
+            }
+        }
         
         // Get host(s) from request
         let hosts: Vec<&str> = req_header

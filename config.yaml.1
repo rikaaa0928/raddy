@@ -1,0 +1,71 @@
+# Raddy Proxy Configuration
+# This is an example configuration file demonstrating all supported features
+
+# Listen configuration - where the proxy server will accept connections
+listen:
+  address: "0.0.0.0"     # Bind to all interfaces
+  http_port: 8080        # HTTP listen port
+  https_port: 8443       # HTTPS listen port (optional)
+  force_https_redirect: false # Redirect all HTTP traffic to HTTPS (optional)
+  tls:                   # TLS configuration (required if https_port is set)
+    cert_path: "certs/server.crt"
+    key_path: "certs/server.key"
+
+# Routes configuration - list of routing rules
+# Routes are evaluated in order; first match wins
+routes:
+  # HTTP backend example - redirects to httpbin.org
+  - host: "api.example.com"
+    path_prefix: "/"
+    upstream:
+      url: "https://httpbin.org"
+      protocol: https
+    headers:
+      X-Forwarded-By: "raddy-proxy"
+
+  # HTTPS backend example - redirects to httpbin.org
+  - host: "secure.example.com"
+    upstream:
+      url: "https://httpbin.org"
+      protocol: https
+
+  # WebSocket backend example
+  # Note: echo.websocket.org requires TLS, so we use wss protocol even for ws frontend
+  - host: "ws.example.com"
+    path_prefix: "/"
+    upstream:
+      url: "wss://ws.postman-echo.com"
+      protocol: wss
+
+  # WebSocket Secure (WSS) backend example
+  - host: "wss.example.com"
+    upstream:
+      url: "wss://ws.postman-echo.com"
+      protocol: wss
+
+  # gRPC backend example (HTTP/2) - redirects to grpcb.in (insecure)
+  - host: "grpc.example.com"
+    upstream:
+      url: "http://grpcb.in:9000"
+      protocol: grpc
+
+  # gRPC with TLS backend example - redirects to grpcb.in (secure)
+  - host: "grpcs.example.com"
+    upstream:
+      url: "https://grpcb.in:9001"
+      protocol: grpc_tls
+
+  # Path-based routing without host restriction
+  - path_prefix: "/moe.rikaaa0928.rog.RogService/"
+    upstream:
+      url: "http://127.0.0.1:54321"
+      protocol: grpc
+
+  # Default catch-all route (should be last)
+  # Matches all requests that don't match above routes
+  - path_prefix: "/"
+    upstream:
+      url: "https://httpbin.org"
+      protocol: http
+    headers:
+      A: "B"

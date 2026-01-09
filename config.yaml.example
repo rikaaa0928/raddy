@@ -1,0 +1,22 @@
+# Raddy Proxy Configuration for ACME Testing
+# Replace YOUR_DOMAIN with your actual domain name
+# Replace YOUR_EMAIL with your email address
+
+listen:
+  address: "0.0.0.0"
+  http_port: 80
+  https_port: 443
+  tls:
+    acme:
+      email: "your-email@example.com"
+      domains:
+        - "your-domain.com"
+      staging: true  # Set to false for production certificates
+      cert_dir: "./certs"
+      renew_before_days: 30
+
+routes:
+  # Default route - proxy to httpbin for testing
+  - upstream:
+      url: "https://httpbin.org"
+      protocol: https
