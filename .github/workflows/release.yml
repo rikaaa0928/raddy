@@ -28,12 +28,12 @@ jobs:
             archive_name: raddy-linux-aarch64.tar.gz
           # macOS x86_64
           - target: x86_64-apple-darwin
-            os: macos-13 # Intel
+            os: macos-latest # Apple Silicon (Cross-compile to x86_64)
             use_zigbuild: false
             archive_name: raddy-darwin-x86_64.tar.gz
           # macOS aarch64
           - target: aarch64-apple-darwin
-            os: macos-14 # Apple Silicon
+            os: macos-latest # Apple Silicon
             use_zigbuild: false
             archive_name: raddy-darwin-aarch64.tar.gz
           # Windows x86_64
