@@ -236,6 +236,16 @@ impl CertificateManager {
                         return Ok(true);
                     } else {
                         info!("Existing certificate needs renewal");
+                        // If certificate is still valid (not expired), load it anyway
+                        // The background task will handle the renewal
+                        if cert_pair.expires_at > Utc::now() {
+                            info!(
+                                "Loaded existing certificate (needing renewal), expires at: {}",
+                                cert_pair.expires_at
+                            );
+                            self.cert_store.store(cert_pair);
+                            return Ok(true);
+                        }
                     }
                 }
                 Err(e) => {

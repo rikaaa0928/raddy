@@ -243,6 +243,12 @@ fn generate_temp_cert(domains: &[String]) -> Result<CertKeyPair, Box<dyn std::er
     let mut params = CertificateParams::new(domains.to_vec())?;
     params.distinguished_name = rcgen::DistinguishedName::new();
     
+    // Set short expiration for temporary cert (1 day) so it triggers ACME renewal immediately
+    // We need to set this in the certificate parameters so the generated PEM has short validity
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::hours(1);
+    params.not_after = now + time::Duration::days(1);
+    
     let key_pair = KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
     
@@ -250,6 +256,7 @@ fn generate_temp_cert(domains: &[String]) -> Result<CertKeyPair, Box<dyn std::er
     let key_pem = key_pair.serialize_pem();
     
     // Temporary cert, set expiry to 1 day from now
+    // This matches what we put in the certificate parameters
     let expires_at = chrono::Utc::now() + chrono::Duration::days(1);
     
     Ok(CertKeyPair {
