@@ -3,7 +3,11 @@ mod config;
 mod proxy;
 
 use log::{error, info, warn};
+use mimalloc::MiMalloc;
 use pingora::prelude::*;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 use std::sync::Arc;
 
 use acme::{CertKeyPair, CertStore, CertificateManager, ChallengeStore};
