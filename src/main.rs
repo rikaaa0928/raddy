@@ -226,9 +226,9 @@ fn main() {
                 std::process::exit(1);
             }
 
-            https_proxy
-                .add_tls(&addr, &cert_path, &key_path)
-                .expect("Failed to add TLS listener");
+            let mut tls_settings = pingora::listeners::tls::TlsSettings::intermediate(&cert_path, &key_path).expect("Failed to create TLS settings");
+            tls_settings.enable_h2();
+            https_proxy.add_tls_with_settings(&addr, None, tls_settings);
             server.add_service(https_proxy);
         } else {
             error!("HTTPS port configured but TLS config is missing");
