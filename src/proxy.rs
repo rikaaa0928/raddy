@@ -180,8 +180,8 @@ impl ProxyHttp for ProxyService {
         })?;
 
         info!(
-            "Routing to upstream: host={:?}, path_prefix={:?}, upstream={}",
-            route.host, route.path_prefix, route.upstream.url
+            "Routing to upstream: hosts={:?}, path_prefix={:?}, upstream={}",
+            route.hosts, route.path_prefix, route.upstream.url
         );
         
         let req_header = session.req_header();

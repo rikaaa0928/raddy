@@ -48,9 +48,9 @@ fn main() {
 
     for (i, route) in config.routes.iter().enumerate() {
         info!(
-            "  Route {}: host={:?}, path_prefix={:?} -> {} ({:?})",
+            "  Route {}: hosts={:?}, path_prefix={:?} -> {} ({:?})",
             i,
-            route.host,
+            route.hosts,
             route.path_prefix,
             route.upstream.url,
             route.upstream.protocol

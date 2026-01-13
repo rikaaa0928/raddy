@@ -76,8 +76,14 @@ fn default_renew_before_days() -> u32 {
 /// Route configuration for matching requests
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConfig {
-    /// Host to match (optional, matches all if not specified)
-    pub host: Option<String>,
+    /// Host(s) to match (optional, matches all if not specified)
+    /// Supports single string "example.com" or list ["a.com", "b.com"]
+    #[serde(
+        default,
+        alias = "host",
+        deserialize_with = "deserialize_string_or_vec"
+    )]
+    pub hosts: Option<Vec<String>>,
     /// Path prefix to match (optional, matches all if not specified)
     pub path_prefix: Option<String>,
     /// Upstream configuration
@@ -87,6 +93,25 @@ pub struct RouteConfig {
     pub headers: std::collections::HashMap<String, String>,
     /// Force HTTPS redirect for this route (overrides global setting)
     pub force_https_redirect: Option<bool>,
+}
+
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    let opt = Option::<StringOrVec>::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(StringOrVec::String(s)) => Ok(Some(vec![s])),
+        Some(StringOrVec::Vec(v)) => Ok(Some(v)),
+    }
 }
 
 /// Upstream server configuration
@@ -190,10 +215,12 @@ impl Config {
     pub fn find_route(&self, hosts: &[&str], path: &str) -> Option<&RouteConfig> {
         // First, try to find an exact match with both host and path_prefix
         for route in &self.routes {
-            let host_matches = match &route.host {
-                Some(route_host) => {
-                    hosts.iter().any(|req_host| {
-                         req_host == &route_host || req_host.starts_with(&format!("{}:", route_host))
+            let host_matches = match &route.hosts {
+                Some(route_hosts) => {
+                    route_hosts.iter().any(|route_host| {
+                        hosts.iter().any(|req_host| {
+                             req_host == &route_host || req_host.starts_with(&format!("{}:", route_host))
+                        })
                     })
                 }
                 None => true,
@@ -244,3 +271,81 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_single_host() {
+        let yaml = r#"
+upstream:
+  url: "http://localhost:8080"
+  protocol: http
+host: example.com
+"#;
+        let config: RouteConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.hosts, Some(vec!["example.com".to_string()]));
+    }
+
+    #[test]
+    fn test_deserialize_multiple_hosts() {
+        let yaml = r#"
+upstream:
+  url: "http://localhost:8080"
+  protocol: http
+hosts:
+  - example.com
+  - api.example.com
+"#;
+        let config: RouteConfig = serde_yaml::from_str(yaml).unwrap();
+        let hosts = config.hosts.unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.contains(&"example.com".to_string()));
+        assert!(hosts.contains(&"api.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_deserialize_no_host() {
+        let yaml = r#"
+upstream:
+  url: "http://localhost:8080"
+  protocol: http
+"#;
+        let config: RouteConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.hosts, None);
+    }
+
+    #[test]
+    fn test_find_route() {
+        let route1 = RouteConfig {
+            hosts: Some(vec!["example.com".to_string(), "alias.com".to_string()]),
+            path_prefix: None,
+            upstream: UpstreamConfig { url: "u1".to_string(), protocol: Protocol::Http },
+            headers: Default::default(),
+            force_https_redirect: None,
+        };
+        
+        let mut routes = Vec::new();
+        routes.push(route1);
+
+        let config = Config {
+            listen: ListenConfig {
+                address: "0.0.0.0".to_string(),
+                port: Some(80),
+                http_port: None,
+                https_port: None,
+                tls: None,
+                force_https_redirect: false,
+            },
+            routes,
+        };
+
+        // Match first host
+        assert!(config.find_route(&["example.com"], "/").is_some());
+        // Match second host
+        assert!(config.find_route(&["alias.com"], "/").is_some());
+        // No match
+        assert!(config.find_route(&["other.com"], "/").is_none());
+    }
+}
