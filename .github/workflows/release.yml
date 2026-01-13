@@ -69,10 +69,15 @@ jobs:
 
       - name: Install OpenSSL (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
           vcpkg install openssl:x64-windows-static
-          echo "OPENSSL_DIR=C:/vcpkg/installed/x64-windows-static" >> $env:GITHUB_ENV
+          $vcpkgRoot = "C:\vcpkg\installed\x64-windows-static"
+          echo "OPENSSL_DIR=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$vcpkgRoot\lib" >> $env:GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$vcpkgRoot\include" >> $env:GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+          echo "OPENSSL_NO_VENDOR=1" >> $env:GITHUB_ENV
 
       - name: Build
         shell: bash
@@ -81,7 +86,7 @@ jobs:
             # For musl cross-compilation, use vendored OpenSSL
             OPENSSL_STATIC=1 cargo zigbuild --release --target ${{ matrix.target }} --features vendored
           elif [ "${{ matrix.os }}" = "windows-latest" ]; then
-            # Windows uses vcpkg OpenSSL
+            # Windows uses vcpkg OpenSSL - env vars set in previous step
             cargo build --release --target ${{ matrix.target }}
           else
             # macOS and other platforms
