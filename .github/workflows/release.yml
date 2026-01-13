@@ -67,15 +67,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config perl
 
+      - name: Install OpenSSL (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          vcpkg install openssl:x64-windows-static
+          echo "OPENSSL_DIR=C:/vcpkg/installed/x64-windows-static" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+
       - name: Build
         shell: bash
-        env:
-          OPENSSL_STATIC: "1"
         run: |
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
             # For musl cross-compilation, use vendored OpenSSL
-            cargo zigbuild --release --target ${{ matrix.target }} --features vendored
+            OPENSSL_STATIC=1 cargo zigbuild --release --target ${{ matrix.target }} --features vendored
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+            # Windows uses vcpkg OpenSSL
+            cargo build --release --target ${{ matrix.target }}
           else
+            # macOS and other platforms
             cargo build --release --target ${{ matrix.target }}
           fi
 
