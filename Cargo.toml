@@ -4,13 +4,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[features]
+default = []
+vendored = ["openssl"]
+
 [dependencies]
 async-trait = "0.1.89"
 env_logger = "0.11.8"
 http = "1.4.0"
 log = "0.4.29"
 mimalloc = { version = "0.1", default-features = false }
-pingora = { version = "0.6.0", features = ["lb", "proxy", "boringssl"] }
+pingora = { version = "0.6.0", features = ["lb", "proxy", "openssl"] }
+openssl = { version = "0.10", optional = true, features = ["vendored"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 tokio = { version = "1.49.0", features = ["full"] }
