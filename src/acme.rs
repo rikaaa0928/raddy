@@ -363,7 +363,7 @@ impl CertificateManager {
                     order.set_challenge_ready(&challenge.url).await?;
                 }
                 AuthorizationStatus::Valid => {
-                    debug!("Authorization already valid for {:?}", auth.identifier);
+                    info!("Authorization already valid for {:?} (skipping challenge)", auth.identifier);
                 }
                 _ => {
                     return Err(format!(
@@ -388,6 +388,18 @@ impl CertificateManager {
                     break;
                 }
                 OrderStatus::Invalid => {
+                    // Log detailed error information
+                    for auth in order.authorizations().await? {
+                         if auth.status == AuthorizationStatus::Invalid {
+                             for challenge in auth.challenges {
+                                 if let Some(error) = challenge.error {
+                                     error!("Authorization failed for domain {:?}: {:?} - {:?}", 
+                                         auth.identifier, error.r#type, error.detail);
+                                 }
+                             }
+                         }
+                    }
+
                     // Clean up all challenge tokens
                     for token in &challenge_tokens {
                         self.challenge_store.remove(token).await;
