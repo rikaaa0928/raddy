@@ -1,6 +1,7 @@
 mod acme;
 mod config;
 mod proxy;
+mod tls;
 
 use log::{error, info, warn};
 use mimalloc::MiMalloc;
@@ -13,13 +14,9 @@ use std::sync::Arc;
 use acme::{CertKeyPair, CertStore, CertificateManager, ChallengeStore};
 use config::Config;
 use proxy::ProxyService;
+use tls::DynamicCert;
 
 fn main() {
-    // Install rustls crypto provider (ring) before any TLS operations
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -226,7 +223,15 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let mut tls_settings = pingora::listeners::tls::TlsSettings::intermediate(&cert_path, &key_path).expect("Failed to create TLS settings");
+            // Use dynamic certificate callback for TLS hot-reload
+            let dynamic_cert = DynamicCert::with_fallback(
+                cert_store.clone(),
+                &cert_path,
+                &key_path,
+            ).expect("Failed to create dynamic certificate provider");
+            
+            let mut tls_settings = pingora::listeners::tls::TlsSettings::with_callbacks(dynamic_cert)
+                .expect("Failed to create TLS settings with callbacks");
             tls_settings.enable_h2();
             https_proxy.add_tls_with_settings(&addr, None, tls_settings);
             server.add_service(https_proxy);

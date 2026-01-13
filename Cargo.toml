@@ -10,8 +10,7 @@ env_logger = "0.11.8"
 http = "1.4.0"
 log = "0.4.29"
 mimalloc = { version = "0.1", default-features = false }
-pingora = { version = "0.6.0", features = ["lb", "proxy", "rustls"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+pingora = { version = "0.6.0", features = ["lb", "proxy", "boringssl"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 tokio = { version = "1.49.0", features = ["full"] }
