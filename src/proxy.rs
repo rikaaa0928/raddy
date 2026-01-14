@@ -88,8 +88,9 @@ impl ProxyHttp for ProxyService {
             
             if let Some(key_auth) = self.challenge_store.get(token).await {
                 info!("Responding to ACME challenge with key authorization");
-                let mut header = pingora::http::ResponseHeader::build(200, Some(1))?;
+                let mut header = pingora::http::ResponseHeader::build(200, None)?;
                 header.insert_header("Content-Type", "text/plain")?;
+                header.insert_header("Content-Length", key_auth.len().to_string())?;
                 
                 session.write_response_header(Box::new(header), false).await?;
                 session.write_response_body(Some(key_auth.into()), true).await?;
