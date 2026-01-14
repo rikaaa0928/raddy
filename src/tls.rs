@@ -70,59 +70,65 @@ impl DynamicCert {
 #[async_trait]
 impl pingora::listeners::TlsAccept for DynamicCert {
     async fn certificate_callback(&self, ssl: &mut SslRef) {
-        // Try to load certificate from CertStore first
-        let cert_guard = self.cert_store.load();
+        // Extract SNI (Server Name Indication) from the SSL context
+        let sni = ssl.servername(pingora::tls::ssl::NameType::HOST_NAME)
+            .map(|s| s.to_string());
         
-        let result = if let Some(cert_pair) = &**cert_guard {
-            // Use certificate from CertStore (hot-reloadable)
-            debug!("Using certificate from CertStore (expires: {})", cert_pair.expires_at);
-            Self::load_from_pem(&cert_pair.cert_pem, &cert_pair.key_pem)
+        debug!("TLS handshake with SNI: {:?}", sni);
+
+        // Try to get certificate for the requested domain
+        let cert_pair = if let Some(ref domain) = sni {
+            self.cert_store.get_for_domain_or_default(domain)
         } else {
-            // Fall back to static certificate if available
-            if let (Some(cert), Some(key)) = (&self.fallback_cert, &self.fallback_key) {
-                debug!("Using fallback certificate");
-                if let Err(e) = ext::ssl_use_certificate(ssl, cert) {
-                    error!("Failed to set fallback certificate: {}", e);
-                    return;
-                }
-                if let Err(e) = ext::ssl_use_private_key(ssl, key) {
-                    error!("Failed to set fallback private key: {}", e);
-                    return;
-                }
-                return;
-            } else {
-                warn!("No certificate available in CertStore and no fallback configured");
-                return;
-            }
+            // No SNI, use default certificate
+            (**self.cert_store.load()).clone()
         };
 
-        // Apply the loaded certificate and key
-        match result {
-            Ok((cert, key)) => {
-                if let Err(e) = ext::ssl_use_certificate(ssl, &cert) {
-                    error!("Failed to set certificate: {}", e);
-                    return;
-                }
-                if let Err(e) = ext::ssl_use_private_key(ssl, &key) {
-                    error!("Failed to set private key: {}", e);
-                    return;
-                }
-                debug!("Certificate callback completed successfully");
-            }
-            Err(e) => {
-                error!("Failed to load certificate from PEM: {}", e);
-                // Try fallback if available
-                if let (Some(cert), Some(key)) = (&self.fallback_cert, &self.fallback_key) {
-                    warn!("Falling back to static certificate");
-                    if let Err(e) = ext::ssl_use_certificate(ssl, cert) {
-                        error!("Failed to set fallback certificate: {}", e);
-                        return;
+        // Apply the certificate
+        match cert_pair {
+            Some(pair) => {
+                debug!("Using certificate for SNI {:?} (expires: {})", sni, pair.expires_at);
+                match Self::load_from_pem(&pair.cert_pem, &pair.key_pem) {
+                    Ok((cert, key)) => {
+                        if let Err(e) = ext::ssl_use_certificate(ssl, &cert) {
+                            error!("Failed to set certificate: {}", e);
+                            return;
+                        }
+                        if let Err(e) = ext::ssl_use_private_key(ssl, &key) {
+                            error!("Failed to set private key: {}", e);
+                            return;
+                        }
+                        debug!("Certificate callback completed successfully for SNI {:?}", sni);
                     }
-                    if let Err(e) = ext::ssl_use_private_key(ssl, key) {
-                        error!("Failed to set fallback private key: {}", e);
+                    Err(e) => {
+                        error!("Failed to load certificate from PEM: {}", e);
+                        self.apply_fallback(ssl);
                     }
                 }
             }
+            None => {
+                // No certificate in store, try fallback
+                warn!("No certificate found for SNI {:?}, trying fallback", sni);
+                self.apply_fallback(ssl);
+            }
+        }
+    }
+}
+
+impl DynamicCert {
+    /// Apply fallback certificate if available
+    fn apply_fallback(&self, ssl: &mut SslRef) {
+        if let (Some(cert), Some(key)) = (&self.fallback_cert, &self.fallback_key) {
+            debug!("Using fallback certificate");
+            if let Err(e) = ext::ssl_use_certificate(ssl, cert) {
+                error!("Failed to set fallback certificate: {}", e);
+                return;
+            }
+            if let Err(e) = ext::ssl_use_private_key(ssl, key) {
+                error!("Failed to set fallback private key: {}", e);
+            }
+        } else {
+            warn!("No certificate available and no fallback configured");
         }
     }
 }

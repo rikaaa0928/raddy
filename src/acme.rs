@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
-use crate::config::AcmeConfig;
+use crate::config::AcmeCertSource;
 
 /// Certificate and key pair with expiration info
 #[derive(Clone)]
@@ -121,23 +121,63 @@ impl CertKeyPair {
 }
 
 /// Thread-safe certificate store with atomic updates
+/// 
+/// Supports domain-indexed certificate storage for SNI-based certificate selection.
 pub struct CertStore {
-    cert: ArcSwap<Option<CertKeyPair>>,
+    /// Domain-indexed certificate storage
+    /// Key is the domain name, value is the certificate pair
+    certs: ArcSwap<HashMap<String, CertKeyPair>>,
+    /// Default certificate for when no domain-specific cert is found
+    default_cert: ArcSwap<Option<CertKeyPair>>,
 }
 
 impl CertStore {
     pub fn new() -> Self {
         Self {
-            cert: ArcSwap::from_pointee(None),
+            certs: ArcSwap::from_pointee(HashMap::new()),
+            default_cert: ArcSwap::from_pointee(None),
         }
     }
 
+    /// Load the default certificate (legacy API)
     pub fn load(&self) -> arc_swap::Guard<Arc<Option<CertKeyPair>>> {
-        self.cert.load()
+        self.default_cert.load()
     }
 
+    /// Store a certificate as the default (legacy API, also stores for given domains if any)
     pub fn store(&self, cert: CertKeyPair) {
-        self.cert.store(Arc::new(Some(cert)));
+        self.default_cert.store(Arc::new(Some(cert)));
+    }
+
+    /// Store a certificate for specific domains
+    pub fn store_for_domains(&self, domains: &[String], cert: CertKeyPair) {
+        let mut certs = (**self.certs.load()).clone();
+        for domain in domains {
+            certs.insert(domain.clone(), cert.clone());
+        }
+        self.certs.store(Arc::new(certs));
+        
+        // Also set as default if no default exists
+        if self.default_cert.load().is_none() {
+            self.default_cert.store(Arc::new(Some(cert)));
+        }
+    }
+
+    /// Get certificate for a specific domain
+    pub fn get_for_domain(&self, domain: &str) -> Option<CertKeyPair> {
+        let certs = self.certs.load();
+        certs.get(domain).cloned()
+    }
+
+    /// Get certificate for a domain, falling back to default
+    pub fn get_for_domain_or_default(&self, domain: &str) -> Option<CertKeyPair> {
+        self.get_for_domain(domain)
+            .or_else(|| (**self.default_cert.load()).clone())
+    }
+
+    /// Get all stored domains
+    pub fn domains(&self) -> Vec<String> {
+        self.certs.load().keys().cloned().collect()
     }
 }
 
@@ -169,11 +209,43 @@ impl ChallengeStore {
     }
 }
 
+/// Internal configuration for ACME Certificate Manager
+/// Combines AcmeCertSource with the domains to manage
+#[derive(Clone)]
+pub struct AcmeManagerConfig {
+    /// Contact email for ACME account
+    pub email: String,
+    /// Domain names to request certificates for
+    pub domains: Vec<String>,
+    /// ACME directory URL
+    pub directory_url: String,
+    /// Directory to store certificates
+    pub cert_dir: String,
+    /// Days before expiration to renew certificate
+    pub renew_before_days: u32,
+    /// Use staging environment
+    pub staging: bool,
+}
+
+impl AcmeManagerConfig {
+    /// Create from AcmeCertSource and domains
+    pub fn from_source(source: &AcmeCertSource, domains: Vec<String>) -> Self {
+        Self {
+            email: source.email.clone(),
+            domains,
+            directory_url: source.directory_url.clone(),
+            cert_dir: source.cert_dir.clone(),
+            renew_before_days: source.renew_before_days,
+            staging: source.staging,
+        }
+    }
+}
+
 /// ACME Certificate Manager
 ///
 /// Handles certificate acquisition, renewal, and hot-reload coordination.
 pub struct CertificateManager {
-    pub config: AcmeConfig,
+    pub config: AcmeManagerConfig,
     cert_store: Arc<CertStore>,
     challenge_store: Arc<ChallengeStore>,
     account: Option<Account>,
@@ -182,7 +254,7 @@ pub struct CertificateManager {
 impl CertificateManager {
     /// Create a new certificate manager
     pub async fn new(
-        config: AcmeConfig,
+        config: AcmeManagerConfig,
         cert_store: Arc<CertStore>,
         challenge_store: Arc<ChallengeStore>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {

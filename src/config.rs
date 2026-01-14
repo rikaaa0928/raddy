@@ -22,31 +22,50 @@ pub struct ListenConfig {
     pub http_port: Option<u16>,
     /// HTTPS port number, e.g., 443 or 8443
     pub https_port: Option<u16>,
-    /// TLS configuration (required if https_port is specified)
-    pub tls: Option<TlsConfig>,
+    /// TLS certificate configurations (required if https_port is specified)
+    /// Each entry defines domains and their certificate source (ACME or file)
+    pub tls: Option<Vec<TlsCertConfig>>,
     /// Global force HTTPS redirect
     #[serde(default)]
     pub force_https_redirect: bool,
 }
 
-/// TLS configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TlsConfig {
-    /// Path to certificate file (optional if using ACME)
-    pub cert_path: Option<String>,
-    /// Path to key file (optional if using ACME)
-    pub key_path: Option<String>,
-    /// ACME automatic certificate configuration
-    pub acme: Option<AcmeConfig>,
+fn default_acme_directory() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
 }
 
-/// ACME automatic certificate configuration
+fn default_cert_dir() -> String {
+    "./certs".to_string()
+}
+
+fn default_renew_before_days() -> u32 {
+    7
+}
+
+/// Per-domain TLS certificate configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcmeConfig {
+pub struct TlsCertConfig {
+    /// Domains this certificate covers
+    pub domains: Vec<String>,
+    /// Certificate source (ACME or static file)
+    pub source: CertSource,
+}
+
+/// Certificate source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CertSource {
+    /// ACME automatic certificate
+    Acme(AcmeCertSource),
+    /// Static certificate from files
+    File(FileCertSource),
+}
+
+/// ACME certificate source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeCertSource {
     /// Contact email for ACME account (required)
     pub email: String,
-    /// Domain names to request certificates for
-    pub domains: Vec<String>,
     /// ACME directory URL (defaults to Let's Encrypt production)
     #[serde(default = "default_acme_directory")]
     pub directory_url: String,
@@ -61,16 +80,13 @@ pub struct AcmeConfig {
     pub staging: bool,
 }
 
-fn default_acme_directory() -> String {
-    "https://acme-v02.api.letsencrypt.org/directory".to_string()
-}
-
-fn default_cert_dir() -> String {
-    "./certs".to_string()
-}
-
-fn default_renew_before_days() -> u32 {
-    7
+/// Static file certificate source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileCertSource {
+    /// Path to certificate file
+    pub cert_path: String,
+    /// Path to private key file
+    pub key_path: String,
 }
 
 /// Route configuration for matching requests
@@ -348,4 +364,76 @@ upstream:
         // No match
         assert!(config.find_route(&["other.com"], "/").is_none());
     }
+
+    #[test]
+    fn test_deserialize_tls_certs_acme() {
+        let yaml = r#"
+domains:
+  - "test.example.com"
+  - "test2.example.com"
+source:
+  type: acme
+  email: "admin@example.com"
+  staging: true
+"#;
+        let cert_config: TlsCertConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cert_config.domains.len(), 2);
+        assert!(cert_config.domains.contains(&"test.example.com".to_string()));
+        
+        match &cert_config.source {
+            CertSource::Acme(acme) => {
+                assert_eq!(acme.email, "admin@example.com");
+                assert!(acme.staging);
+            }
+            _ => panic!("Expected ACME source"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_tls_certs_file() {
+        let yaml = r#"
+domains:
+  - "static.example.com"
+source:
+  type: file
+  cert_path: "/path/to/cert.pem"
+  key_path: "/path/to/key.pem"
+"#;
+        let cert_config: TlsCertConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cert_config.domains.len(), 1);
+        assert_eq!(cert_config.domains[0], "static.example.com");
+        
+        match &cert_config.source {
+            CertSource::File(file) => {
+                assert_eq!(file.cert_path, "/path/to/cert.pem");
+                assert_eq!(file.key_path, "/path/to/key.pem");
+            }
+            _ => panic!("Expected File source"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_tls_certs_list() {
+        let yaml = r#"
+- domains:
+    - "acme.example.com"
+  source:
+    type: acme
+    email: "admin@example.com"
+- domains:
+    - "static.example.com"
+  source:
+    type: file
+    cert_path: "/path/to/cert.pem"
+    key_path: "/path/to/key.pem"
+"#;
+        let tls_certs: Vec<TlsCertConfig> = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(tls_certs.len(), 2);
+        
+        // First cert should be ACME
+        assert!(matches!(&tls_certs[0].source, CertSource::Acme(_)));
+        // Second cert should be File
+        assert!(matches!(&tls_certs[1].source, CertSource::File(_)));
+    }
+
 }
