@@ -104,12 +104,29 @@ impl ProxyHttp for ProxyService {
         }
         
         // Get host(s) from request
-        let hosts: Vec<&str> = req_header
+        // Check both 'host' header (HTTP/1.1) and ':authority' pseudo-header (HTTP/2/gRPC)
+        let mut hosts: Vec<&str> = req_header
             .headers
             .get_all("host")
             .iter()
             .filter_map(|v| v.to_str().ok())
             .collect();
+        
+        // For HTTP/2 (gRPC), also check the :authority pseudo-header
+        if hosts.is_empty() {
+            if let Some(authority) = req_header.headers.get(":authority") {
+                if let Ok(auth_str) = authority.to_str() {
+                    hosts.push(auth_str);
+                }
+            }
+        }
+        
+        // Also try to get host from URI authority if still empty
+        if hosts.is_empty() {
+            if let Some(host) = req_header.uri.host() {
+                hosts.push(host);
+            }
+        }
 
         // Get path from request
         let path = req_header.uri.path();
