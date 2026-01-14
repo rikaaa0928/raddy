@@ -56,14 +56,24 @@ impl DynamicCert {
         }))
     }
 
-    /// Load certificate and key from PEM strings
+    /// Load certificate chain and key from PEM strings
+    /// Returns (leaf_cert, chain_certs, private_key)
     fn load_from_pem(
         cert_pem: &str,
         key_pem: &str,
-    ) -> Result<(X509, PKey<Private>), Box<dyn std::error::Error + Send + Sync>> {
-        let cert = X509::from_pem(cert_pem.as_bytes())?;
+    ) -> Result<(X509, Vec<X509>, PKey<Private>), Box<dyn std::error::Error + Send + Sync>> {
+        // Parse all certificates in the PEM (leaf + intermediates)
+        let certs = X509::stack_from_pem(cert_pem.as_bytes())?;
+        if certs.is_empty() {
+            return Err("No certificates found in PEM".into());
+        }
+        
+        // First cert is the leaf, rest are chain (intermediates)
+        let leaf_cert = certs[0].clone();
+        let chain_certs: Vec<X509> = certs.into_iter().skip(1).collect();
+        
         let key = PKey::private_key_from_pem(key_pem.as_bytes())?;
-        Ok((cert, key))
+        Ok((leaf_cert, chain_certs, key))
     }
 }
 
@@ -89,16 +99,23 @@ impl pingora::listeners::TlsAccept for DynamicCert {
             Some(pair) => {
                 debug!("Using certificate for SNI {:?} (expires: {})", sni, pair.expires_at);
                 match Self::load_from_pem(&pair.cert_pem, &pair.key_pem) {
-                    Ok((cert, key)) => {
+                    Ok((cert, chain_certs, key)) => {
                         if let Err(e) = ext::ssl_use_certificate(ssl, &cert) {
                             error!("Failed to set certificate: {}", e);
                             return;
+                        }
+                        // Add intermediate certificates to the chain
+                        for chain_cert in &chain_certs {
+                            if let Err(e) = ext::ssl_add_chain_cert(ssl, chain_cert) {
+                                error!("Failed to add chain certificate: {}", e);
+                                return;
+                            }
                         }
                         if let Err(e) = ext::ssl_use_private_key(ssl, &key) {
                             error!("Failed to set private key: {}", e);
                             return;
                         }
-                        debug!("Certificate callback completed successfully for SNI {:?}", sni);
+                        debug!("Certificate callback completed successfully for SNI {:?} (chain certs: {})", sni, chain_certs.len());
                     }
                     Err(e) => {
                         error!("Failed to load certificate from PEM: {}", e);
