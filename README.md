@@ -2,23 +2,32 @@
 
 Raddy is a high-performance, lightweight reverse proxy built on [Cloudflare Pingora](https://github.com/cloudflare/pingora). It is designed to be safe, fast, and easy to configure, with built-in support for modern protocols and automatic SSL certificate management.
 
+[中文文档](README_ZH.md)
+
 ## Features
 
 - **Built on Pingora**: Leverages the high-performance, memory-safe architecture of Cloudflare's proxy framework.
-- **Protocol Support**: Full support for HTTP/1.1, HTTP/2, gRPC, and WebSockets (WS/WSS).
+- **Protocol Support**: Full support for HTTP/1.1, HTTP/2, gRPC (h2c/TLS), and WebSockets (WS/WSS).
 - **Auto SSL (ACME)**: Built-in integration with Let's Encrypt for automatic certificate issuance and renewal.
-- **Flexible Routing**: Route requests based on Hostnames and Path prefixes.
-- **TLS Termination**: Support for both static certificates and automatic ACME certificates.
+- **TLS Hot-Reload**: Certificates are automatically reloaded after renewal without server restart.
+- **Per-Domain TLS**: Flexible per-domain certificate configuration with SNI-based certificate selection.
+- **Multi-Host Routing**: Route configuration supports matching multiple hosts for the same upstream.
+- **Flexible Routing**: Route requests based on hostnames and path prefixes.
 - **Custom Headers**: Easy configuration for adding or overriding request headers.
+- **High Performance**: Uses MiMalloc allocator for optimal memory performance.
 
 ## Installation
+
+### Download Pre-built Binaries
+
+Download the latest release from the [Releases](https://github.com/rikaaa0928/raddy/releases) page.
 
 ### Build from Source
 
 Ensure you have Rust installed (1.75+ recommended).
 
 ```bash
-git clone https://github.com/your-username/raddy.git
+git clone https://github.com/rikaaa0928/raddy.git
 cd raddy
 cargo build --release
 ```
@@ -45,56 +54,67 @@ Raddy uses a YAML configuration file. Below is a comprehensive example:
 
 ```yaml
 listen:
-  # Bind address
   address: "0.0.0.0"
-  
-  # Port configurations
   http_port: 80
   https_port: 443
   
-  # Global HTTPS redirect
-  force_https_redirect: false
-  
-  # TLS Configuration (Choose either Static or ACME)
+  # Per-domain TLS configuration
   tls:
-    # Option 1: Automatic ACME (Let's Encrypt)
-    acme:
-      email: "user@example.com"
-      domains: 
+    # ACME automatic certificate
+    - domains:
         - "example.com"
         - "www.example.com"
-      cert_dir: "./certs"
-      staging: false # Set to true for testing
-      
-    # Option 2: Static Certificates
-    # cert_path: "/path/to/cert.pem"
-    # key_path: "/path/to/key.pem"
+      source:
+        type: acme
+        email: "admin@example.com"
+        staging: false           # Set to true for testing
+        cert_dir: "./certs"
+        renew_before_days: 30
+    
+    # Static certificate from files
+    - domains:
+        - "api.example.com"
+      source:
+        type: file
+        cert_path: "/path/to/cert.pem"
+        key_path: "/path/to/key.pem"
 
 routes:
-  - host: "example.com"
+  # Multi-host routing
+  - host:
+      - "example.com"
+      - "www.example.com"
     path_prefix: "/"
     upstream:
       url: "127.0.0.1:3000"
-      protocol: "http" # Options: http, https, grpc, grpc_tls, ws, wss
+      protocol: http
     force_https_redirect: true
     headers:
       X-Custom-Header: "Raddy-Proxy"
 
-  - host: "api.example.com"
-    path_prefix: "/v1"
+  # gRPC with TLS
+  - host: "grpc.example.com"
+    upstream:
+      url: "127.0.0.1:50051"
+      protocol: grpc_tls
+
+  # WebSocket
+  - host: "ws.example.com"
     upstream:
       url: "127.0.0.1:8080"
-      protocol: "grpc"
+      protocol: ws
 ```
 
 ### Upstream Protocols
 
-- `http`: Plain HTTP
-- `https`: HTTPS with TLS
-- `grpc`: gRPC over HTTP/2
-- `grpc_tls`: gRPC over HTTP/2 with TLS
-- `ws`: WebSocket
-- `wss`: WebSocket Secure
+| Protocol   | Description                 |
+|------------|-----------------------------|
+| `http`     | Plain HTTP                  |
+| `https`    | HTTPS with TLS              |
+| `grpc`     | gRPC over HTTP/2 (h2c)      |
+| `grpc_tls` | gRPC over HTTP/2 with TLS   |
+| `ws`       | WebSocket                   |
+| `wss`      | WebSocket Secure            |
 
 ## License
 
