@@ -109,6 +109,20 @@ pub struct RouteConfig {
     pub headers: std::collections::HashMap<String, String>,
     /// Force HTTPS redirect for this route (overrides global setting)
     pub force_https_redirect: Option<bool>,
+    /// Path rewriting configuration
+    pub rewrite: Option<RewriteConfig>,
+    /// Compiled regex for path rewriting (internal use)
+    #[serde(skip)]
+    pub rewrite_regex: Option<regex::Regex>,
+}
+
+/// Path rewriting configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RewriteConfig {
+    /// Regex pattern to match against the path
+    pub pattern: String,
+    /// Replacement string (can contain capture groups like $1, $2)
+    pub to: String,
 }
 
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
@@ -182,11 +196,24 @@ impl Config {
             source: e,
         })?;
 
-        let config: Config =
+        let mut config: Config =
             serde_yaml::from_str(&content).map_err(|e| ConfigError::ParseError {
                 path: path.as_ref().display().to_string(),
                 source: e,
             })?;
+
+        // Compile regexes for rewrite rules
+        for (i, route) in config.routes.iter_mut().enumerate() {
+            if let Some(rewrite) = &route.rewrite {
+                let regex = regex::Regex::new(&rewrite.pattern).map_err(|e| {
+                    ConfigError::ValidationError(format!(
+                        "Invalid rewrite regex in route {}: {}",
+                        i, e
+                    ))
+                })?;
+                route.rewrite_regex = Some(regex);
+            }
+        }
 
         config.validate()?;
         Ok(config)
@@ -340,6 +367,8 @@ upstream:
             upstream: UpstreamConfig { url: "u1".to_string(), protocol: Protocol::Http },
             headers: Default::default(),
             force_https_redirect: None,
+            rewrite: None,
+            rewrite_regex: None,
         };
         
         let mut routes = Vec::new();

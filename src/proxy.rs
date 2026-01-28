@@ -49,6 +49,40 @@ impl ProxyService {
 
         Ok((host.to_string(), port, use_tls))
     }
+
+    /// Rewrite the path based on the route configuration
+    /// Returns Some(new_uri) if rewriting occurred, None otherwise
+    fn rewrite_path(uri: &http::Uri, route: &RouteConfig) -> Result<Option<http::Uri>, Box<pingora::Error>> {
+        if let (Some(regex), Some(rewrite)) = (&route.rewrite_regex, &route.rewrite) {
+            let path = uri.path();
+            let new_path = regex.replace(path, &rewrite.to);
+
+            if new_path != path {
+                debug!("Rewriting path {} -> {}", path, new_path);
+                let mut parts = uri.clone().into_parts();
+                let new_path_and_query = if let Some(query) = uri.query() {
+                    format!("{}?{}", new_path, query)
+                } else {
+                    new_path.to_string()
+                };
+
+                let new_path_and_query = new_path_and_query.parse().map_err(|e| {
+                    error!("Invalid rewritten path: {}", e);
+                    pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+                })?;
+                
+                parts.path_and_query = Some(new_path_and_query);
+
+                let new_uri = http::Uri::from_parts(parts).map_err(|e| {
+                    error!("Failed to build URI: {}", e);
+                    pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+                })?;
+                
+                return Ok(Some(new_uri));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Context passed between request phases
@@ -253,6 +287,11 @@ impl ProxyHttp for ProxyService {
     ) -> Result<(), Box<pingora::Error>> {
         // Set proper Host header for upstream
         if let Some(route) = &ctx.route {
+            // Apply path rewrite if configured
+            if let Some(new_uri) = Self::rewrite_path(&upstream_request.uri, route)? {
+                upstream_request.set_uri(new_uri);
+            }
+
             if let Ok(parsed) = Url::parse(&route.upstream.url) {
                 if let Some(host) = parsed.host_str() {
                     let host_value = if let Some(port) = parsed.port() {
@@ -396,3 +435,51 @@ impl ProxyHttp for ProxyService {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{RewriteConfig, UpstreamConfig};
+
+    #[test]
+    fn test_rewrite_path() {
+        let pattern = "^/api/(.*)$";
+        let regex = regex::Regex::new(pattern).unwrap();
+        
+        let route = RouteConfig {
+            hosts: None,
+            path_prefix: None,
+            upstream: UpstreamConfig {
+                url: "http://localhost".to_string(),
+                protocol: Protocol::Http,
+            },
+            headers: Default::default(),
+            force_https_redirect: None,
+            rewrite: Some(RewriteConfig {
+                pattern: pattern.to_string(),
+                to: "/v1/$1".to_string(),
+            }),
+            rewrite_regex: Some(regex),
+        };
+        
+        // Test match
+        let uri = "/api/users".parse::<http::Uri>().unwrap();
+        let new_uri = ProxyService::rewrite_path(&uri, &route).unwrap();
+        assert!(new_uri.is_some());
+        assert_eq!(new_uri.unwrap().path(), "/v1/users");
+        
+        // Test no match
+        let uri = "/other/users".parse::<http::Uri>().unwrap();
+        let new_uri = ProxyService::rewrite_path(&uri, &route).unwrap();
+        assert!(new_uri.is_none());
+        
+        // Test query preservation
+        let uri = "/api/users?query=1".parse::<http::Uri>().unwrap();
+        let new_uri = ProxyService::rewrite_path(&uri, &route).unwrap();
+        assert!(new_uri.is_some());
+        let u = new_uri.unwrap();
+        assert_eq!(u.path(), "/v1/users");
+        assert_eq!(u.query(), Some("query=1"));
+    }
+}
+

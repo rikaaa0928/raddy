@@ -105,6 +105,60 @@ routes:
       protocol: ws
 ```
 
+### Path Rewriting Logic
+
+When configuring routes with both `path_prefix` and an upstream `url` containing a path, Raddy concatenates the paths. It does **not** strip the matched `path_prefix`.
+
+Examples of request handling for a request to `/a/c`:
+
+
+1. **Prefix with Upstream Path**
+
+   ```yaml
+   path_prefix: "/a"
+   upstream:
+     url: "127.0.0.1:3000/b"
+   ```
+
+   Result: `127.0.0.1:3000/b/a/c` (Original path `/a/c` appended to upstream path `/b`)
+
+2. **Root Prefix with Upstream Path**
+
+   ```yaml
+   path_prefix: "/"
+   upstream:
+     url: "127.0.0.1:3000/b"
+   ```
+
+   Result: `127.0.0.1:3000/b/a/c` (Original path `/a/c` appended to upstream path `/b`)
+
+3. **Prefix with Root Upstream**
+
+   ```yaml
+   path_prefix: "/a"
+   upstream:
+     url: "127.0.0.1:3000"
+   ```
+
+   Result: `127.0.0.1:3000/a/c` (No upstream path to prepend, so original path `/a/c` is preserved)
+
+### Regex Path Rewriting
+
+Raddy supports rewriting request paths using regular expressions. This allows for complex path transformations before forwarding to the upstream.
+
+```yaml
+routes:
+  - host: "api.example.com"
+    rewrite:
+      pattern: "^/api/v1/(.*)$"
+      to: "/services/v1/$1"
+    upstream:
+      url: "http://backend-service"
+      protocol: http
+```
+
+When `rewrite` is configured, the transformed path is used. The `pattern` is a standard Regex, and `to` is the replacement string which supports capture groups (e.g., `$1`).
+
 ### Upstream Protocols
 
 | Protocol   | Description                 |
