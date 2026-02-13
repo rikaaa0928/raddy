@@ -56,25 +56,6 @@ impl DynamicCert {
         }))
     }
 
-    /// Load certificate chain and key from PEM strings
-    /// Returns (leaf_cert, chain_certs, private_key)
-    fn load_from_pem(
-        cert_pem: &str,
-        key_pem: &str,
-    ) -> Result<(X509, Vec<X509>, PKey<Private>), Box<dyn std::error::Error + Send + Sync>> {
-        // Parse all certificates in the PEM (leaf + intermediates)
-        let certs = X509::stack_from_pem(cert_pem.as_bytes())?;
-        if certs.is_empty() {
-            return Err("No certificates found in PEM".into());
-        }
-        
-        // First cert is the leaf, rest are chain (intermediates)
-        let leaf_cert = certs[0].clone();
-        let chain_certs: Vec<X509> = certs.into_iter().skip(1).collect();
-        
-        let key = PKey::private_key_from_pem(key_pem.as_bytes())?;
-        Ok((leaf_cert, chain_certs, key))
-    }
 }
 
 #[async_trait]
@@ -86,45 +67,32 @@ impl pingora::listeners::TlsAccept for DynamicCert {
         
         debug!("TLS handshake with SNI: {:?}", sni);
 
-        // Try to get certificate for the requested domain
-        let cert_pair = if let Some(ref domain) = sni {
-            self.cert_store.get_for_domain_or_default(domain)
+        // Use pre-parsed certificate objects (parsed once at store time)
+        let parsed = if let Some(ref domain) = sni {
+            self.cert_store.get_parsed_for_domain_or_default(domain)
         } else {
-            // No SNI, use default certificate
-            (**self.cert_store.load()).clone()
+            self.cert_store.get_default_parsed()
         };
 
-        // Apply the certificate
-        match cert_pair {
-            Some(pair) => {
-                debug!("Using certificate for SNI {:?} (expires: {})", sni, pair.expires_at);
-                match Self::load_from_pem(&pair.cert_pem, &pair.key_pem) {
-                    Ok((cert, chain_certs, key)) => {
-                        if let Err(e) = ext::ssl_use_certificate(ssl, &cert) {
-                            error!("Failed to set certificate: {}", e);
-                            return;
-                        }
-                        // Add intermediate certificates to the chain
-                        for chain_cert in &chain_certs {
-                            if let Err(e) = ext::ssl_add_chain_cert(ssl, chain_cert) {
-                                error!("Failed to add chain certificate: {}", e);
-                                return;
-                            }
-                        }
-                        if let Err(e) = ext::ssl_use_private_key(ssl, &key) {
-                            error!("Failed to set private key: {}", e);
-                            return;
-                        }
-                        debug!("Certificate callback completed successfully for SNI {:?} (chain certs: {})", sni, chain_certs.len());
-                    }
-                    Err(e) => {
-                        error!("Failed to load certificate from PEM: {}", e);
-                        self.apply_fallback(ssl);
+        match parsed {
+            Some(cert) => {
+                if let Err(e) = ext::ssl_use_certificate(ssl, &cert.leaf_cert) {
+                    error!("Failed to set certificate: {}", e);
+                    return;
+                }
+                for chain_cert in &cert.chain_certs {
+                    if let Err(e) = ext::ssl_add_chain_cert(ssl, chain_cert) {
+                        error!("Failed to add chain certificate: {}", e);
+                        return;
                     }
                 }
+                if let Err(e) = ext::ssl_use_private_key(ssl, &cert.private_key) {
+                    error!("Failed to set private key: {}", e);
+                    return;
+                }
+                debug!("Certificate callback completed successfully for SNI {:?} (chain certs: {})", sni, cert.chain_certs.len());
             }
             None => {
-                // No certificate in store, try fallback
                 warn!("No certificate found for SNI {:?}, trying fallback", sni);
                 self.apply_fallback(ssl);
             }

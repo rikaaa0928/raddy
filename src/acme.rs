@@ -10,6 +10,8 @@ use instant_acme::{
     NewAccount, NewOrder, OrderStatus,
 };
 use log::{debug, error, info, warn};
+use pingora::tls::pkey::{PKey, Private};
+use pingora::tls::x509::X509;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -120,15 +122,49 @@ impl CertKeyPair {
     }
 }
 
+/// Pre-parsed OpenSSL certificate objects for efficient TLS handshakes.
+/// Avoids re-parsing PEM text on every TLS connection.
+pub struct ParsedCert {
+    pub leaf_cert: X509,
+    pub chain_certs: Vec<X509>,
+    pub private_key: PKey<Private>,
+}
+
+impl ParsedCert {
+    /// Parse certificate chain and private key from PEM strings
+    pub fn from_pem(
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let certs = X509::stack_from_pem(cert_pem.as_bytes())?;
+        if certs.is_empty() {
+            return Err("No certificates found in PEM".into());
+        }
+        let leaf_cert = certs[0].clone();
+        let chain_certs: Vec<X509> = certs.into_iter().skip(1).collect();
+        let private_key = PKey::private_key_from_pem(key_pem.as_bytes())?;
+        Ok(Self {
+            leaf_cert,
+            chain_certs,
+            private_key,
+        })
+    }
+}
+
 /// Thread-safe certificate store with atomic updates
 /// 
 /// Supports domain-indexed certificate storage for SNI-based certificate selection.
+/// Certificates are parsed into OpenSSL objects once at store time and cached
+/// to avoid expensive PEM re-parsing on every TLS handshake.
 pub struct CertStore {
-    /// Domain-indexed certificate storage
-    /// Key is the domain name, value is the certificate pair
+    /// Domain-indexed certificate storage (PEM data for persistence)
     certs: ArcSwap<HashMap<String, CertKeyPair>>,
     /// Default certificate for when no domain-specific cert is found
     default_cert: ArcSwap<Option<CertKeyPair>>,
+    /// Cached pre-parsed certificates per domain
+    parsed_certs: ArcSwap<HashMap<String, Arc<ParsedCert>>>,
+    /// Cached pre-parsed default certificate
+    default_parsed: ArcSwap<Option<Arc<ParsedCert>>>,
 }
 
 impl CertStore {
@@ -136,6 +172,8 @@ impl CertStore {
         Self {
             certs: ArcSwap::from_pointee(HashMap::new()),
             default_cert: ArcSwap::from_pointee(None),
+            parsed_certs: ArcSwap::from_pointee(HashMap::new()),
+            default_parsed: ArcSwap::from_pointee(None),
         }
     }
 
@@ -144,22 +182,53 @@ impl CertStore {
         self.default_cert.load()
     }
 
-    /// Store a certificate as the default (legacy API, also stores for given domains if any)
+    /// Store a certificate as the default (legacy API)
     pub fn store(&self, cert: CertKeyPair) {
+        // Pre-parse and cache
+        match ParsedCert::from_pem(&cert.cert_pem, &cert.key_pem) {
+            Ok(parsed) => {
+                self.default_parsed.store(Arc::new(Some(Arc::new(parsed))));
+            }
+            Err(e) => {
+                warn!("Failed to pre-parse default certificate: {}", e);
+            }
+        }
         self.default_cert.store(Arc::new(Some(cert)));
     }
 
     /// Store a certificate for specific domains
     pub fn store_for_domains(&self, domains: &[String], cert: CertKeyPair) {
+        // Pre-parse once, share across all domains via Arc
+        let parsed = match ParsedCert::from_pem(&cert.cert_pem, &cert.key_pem) {
+            Ok(p) => Some(Arc::new(p)),
+            Err(e) => {
+                warn!("Failed to pre-parse certificate for {:?}: {}", domains, e);
+                None
+            }
+        };
+
+        // Store PEM data
         let mut certs = (**self.certs.load()).clone();
         for domain in domains {
             certs.insert(domain.clone(), cert.clone());
         }
         self.certs.store(Arc::new(certs));
-        
+
+        // Store parsed data (shared via Arc, no duplication)
+        if let Some(ref parsed) = parsed {
+            let mut parsed_map = (**self.parsed_certs.load()).clone();
+            for domain in domains {
+                parsed_map.insert(domain.clone(), parsed.clone());
+            }
+            self.parsed_certs.store(Arc::new(parsed_map));
+        }
+
         // Also set as default if no default exists
         if self.default_cert.load().is_none() {
             self.default_cert.store(Arc::new(Some(cert)));
+            if let Some(parsed) = parsed {
+                self.default_parsed.store(Arc::new(Some(parsed)));
+            }
         }
     }
 
@@ -173,6 +242,21 @@ impl CertStore {
     pub fn get_for_domain_or_default(&self, domain: &str) -> Option<CertKeyPair> {
         self.get_for_domain(domain)
             .or_else(|| (**self.default_cert.load()).clone())
+    }
+
+    /// Get pre-parsed certificate for a domain, falling back to default.
+    /// This avoids PEM re-parsing on every TLS handshake.
+    pub fn get_parsed_for_domain_or_default(&self, domain: &str) -> Option<Arc<ParsedCert>> {
+        let parsed = self.parsed_certs.load();
+        if let Some(cert) = parsed.get(domain) {
+            return Some(cert.clone());
+        }
+        (**self.default_parsed.load()).clone()
+    }
+
+    /// Get pre-parsed default certificate
+    pub fn get_default_parsed(&self) -> Option<Arc<ParsedCert>> {
+        (**self.default_parsed.load()).clone()
     }
 
     /// Get all stored domains
