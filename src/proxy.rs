@@ -407,6 +407,26 @@ impl ProxyHttp for ProxyService {
             debug!("gRPC request, preserving gRPC headers");
         }
 
+        // Add X-Forwarded-For and X-Real-IP headers
+        if let Some(client_addr) = session.client_addr() {
+            if let Some(ip) = client_addr.as_inet() {
+                let ip_str = ip.ip().to_string();
+                
+                // Set X-Real-IP
+                let _ = upstream_request.insert_header("X-Real-IP", ip_str.clone());
+                
+                // Set or append to X-Forwarded-For
+                if let Some(existing_xff) = session.req_header().headers.get("X-Forwarded-For") {
+                    if let Ok(xff_str) = existing_xff.to_str() {
+                        let new_xff = format!("{}, {}", xff_str, ip_str);
+                        let _ = upstream_request.insert_header("X-Forwarded-For", new_xff);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("X-Forwarded-For", ip_str);
+                }
+            }
+        }
+
         Ok(())
     }
 
