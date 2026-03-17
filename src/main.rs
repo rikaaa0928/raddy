@@ -20,11 +20,49 @@ fn main() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Load configuration from environment variable
-    let config_path =
-        std::env::var("RADDY_CONFIG").unwrap_or_else(|_| "config.yaml".to_string());
+    // Determine configuration path
+    let config_path_raw = std::env::var("RADDY_CONFIG").unwrap_or_else(|_| {
+        let etc_path = "/etc/raddy/config.yaml";
+        if std::path::Path::new(etc_path).exists() {
+            etc_path.to_string()
+        } else {
+            "config.yaml".to_string()
+        }
+    });
 
-    info!("Loading configuration from: {}", config_path);
+    // Get absolute path before potentially changing working directory
+    let startup_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config_path = if std::path::Path::new(&config_path_raw).is_absolute() {
+        std::path::PathBuf::from(&config_path_raw)
+    } else {
+        startup_cwd.join(&config_path_raw)
+    };
+
+    // Check if configuration is in the starting working directory
+    let is_in_startup_cwd = match (config_path.canonicalize(), startup_cwd.canonicalize()) {
+        (Ok(abs_config), Ok(abs_cwd)) => abs_config.parent() == Some(&abs_cwd),
+        _ => !config_path_raw.contains('/') && !config_path_raw.contains('\\'),
+    };
+
+    if !is_in_startup_cwd {
+        if let Ok(home) = std::env::var("HOME") {
+            let target_dir = std::path::Path::new(&home).join(".config/raddy");
+            if !target_dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                    warn!("Failed to create working directory {:?}: {}", target_dir, e);
+                }
+            }
+            if target_dir.exists() {
+                if let Err(e) = std::env::set_current_dir(&target_dir) {
+                    warn!("Failed to change working directory to {:?}: {}", target_dir, e);
+                } else {
+                    info!("Changed working directory to {:?}", target_dir);
+                }
+            }
+        }
+    }
+
+    info!("Loading configuration from: {:?}", config_path);
 
     let config = match Config::load(&config_path) {
         Ok(cfg) => Arc::new(cfg),
