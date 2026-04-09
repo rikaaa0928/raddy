@@ -41,6 +41,12 @@ jobs:
             os: windows-latest
             use_zigbuild: false
             archive_name: raddy-windows-x86_64.zip
+          # FreeBSD x86_64
+          - target: x86_64-unknown-freebsd
+            os: ubuntu-latest
+            use_zigbuild: false
+            use_cross: true
+            archive_name: raddy-freebsd-x86_64.tar.gz
 
     steps:
       - name: Checkout code
@@ -60,6 +66,10 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.use_zigbuild
         run: cargo install cargo-zigbuild
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross
 
       - name: Install OpenSSL dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -85,6 +95,8 @@ jobs:
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
             # For musl cross-compilation, use vendored OpenSSL
             OPENSSL_STATIC=1 cargo zigbuild --release --target ${{ matrix.target }} --features vendored
+          elif [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --features vendored
           elif [ "${{ matrix.os }}" = "windows-latest" ]; then
             # Windows uses vcpkg OpenSSL - env vars set in previous step
             cargo build --release --target ${{ matrix.target }}
@@ -132,6 +144,7 @@ jobs:
             raddy-darwin-x86_64.tar.gz/raddy-darwin-x86_64.tar.gz
             raddy-darwin-aarch64.tar.gz/raddy-darwin-aarch64.tar.gz
             raddy-windows-x86_64.zip/raddy-windows-x86_64.zip
+            raddy-freebsd-x86_64.tar.gz/raddy-freebsd-x86_64.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: false
