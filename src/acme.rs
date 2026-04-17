@@ -3,6 +3,7 @@
 //! This module provides automatic SSL certificate acquisition and renewal
 //! using the ACME protocol (Let's Encrypt compatible).
 
+use async_trait::async_trait;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
 use instant_acme::{
@@ -10,6 +11,8 @@ use instant_acme::{
     NewAccount, NewOrder, OrderStatus,
 };
 use log::{debug, error, info, warn};
+use pingora::server::ShutdownWatch;
+use pingora::services::background::BackgroundService;
 use pingora::tls::pkey::{PKey, Private};
 use pingora::tls::x509::X509;
 use std::collections::HashMap;
@@ -158,9 +161,9 @@ impl ParsedCert {
 /// to avoid expensive PEM re-parsing on every TLS handshake.
 pub struct CertStore {
     /// Domain-indexed certificate storage (PEM data for persistence)
-    certs: ArcSwap<HashMap<String, CertKeyPair>>,
+    certs: ArcSwap<HashMap<String, Arc<CertKeyPair>>>,
     /// Default certificate for when no domain-specific cert is found
-    default_cert: ArcSwap<Option<CertKeyPair>>,
+    default_cert: ArcSwap<Option<Arc<CertKeyPair>>>,
     /// Cached pre-parsed certificates per domain
     parsed_certs: ArcSwap<HashMap<String, Arc<ParsedCert>>>,
     /// Cached pre-parsed default certificate
@@ -178,26 +181,17 @@ impl CertStore {
     }
 
     /// Load the default certificate (legacy API)
-    pub fn load(&self) -> arc_swap::Guard<Arc<Option<CertKeyPair>>> {
+    pub fn load(&self) -> arc_swap::Guard<Arc<Option<Arc<CertKeyPair>>>> {
         self.default_cert.load()
-    }
-
-    /// Store a certificate as the default (legacy API)
-    pub fn store(&self, cert: CertKeyPair) {
-        // Pre-parse and cache
-        match ParsedCert::from_pem(&cert.cert_pem, &cert.key_pem) {
-            Ok(parsed) => {
-                self.default_parsed.store(Arc::new(Some(Arc::new(parsed))));
-            }
-            Err(e) => {
-                warn!("Failed to pre-parse default certificate: {}", e);
-            }
-        }
-        self.default_cert.store(Arc::new(Some(cert)));
     }
 
     /// Store a certificate for specific domains
     pub fn store_for_domains(&self, domains: &[String], cert: CertKeyPair) {
+        self.store_shared_for_domains(domains, Arc::new(cert));
+    }
+
+    /// Store a shared certificate for specific domains without duplicating PEM data.
+    pub fn store_shared_for_domains(&self, domains: &[String], cert: Arc<CertKeyPair>) {
         // Pre-parse once, share across all domains via Arc
         let parsed = match ParsedCert::from_pem(&cert.cert_pem, &cert.key_pem) {
             Ok(p) => Some(Arc::new(p)),
@@ -233,15 +227,9 @@ impl CertStore {
     }
 
     /// Get certificate for a specific domain
-    pub fn get_for_domain(&self, domain: &str) -> Option<CertKeyPair> {
+    pub fn get_for_domain(&self, domain: &str) -> Option<Arc<CertKeyPair>> {
         let certs = self.certs.load();
         certs.get(domain).cloned()
-    }
-
-    /// Get certificate for a domain, falling back to default
-    pub fn get_for_domain_or_default(&self, domain: &str) -> Option<CertKeyPair> {
-        self.get_for_domain(domain)
-            .or_else(|| (**self.default_cert.load()).clone())
     }
 
     /// Get pre-parsed certificate for a domain, falling back to default.
@@ -259,10 +247,6 @@ impl CertStore {
         (**self.default_parsed.load()).clone()
     }
 
-    /// Get all stored domains
-    pub fn domains(&self) -> Vec<String> {
-        self.certs.load().keys().cloned().collect()
-    }
 }
 
 /// HTTP-01 challenge token store for ACME validation
@@ -337,38 +321,47 @@ pub struct CertificateManager {
 
 impl CertificateManager {
     /// Create a new certificate manager
-    pub async fn new(
+    pub fn new(
         config: AcmeManagerConfig,
         cert_store: Arc<CertStore>,
         challenge_store: Arc<ChallengeStore>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             config,
             cert_store,
             challenge_store,
             account: None,
-        })
+        }
     }
 
     /// Get the certificate store for use with GlobalCertificate
-    pub fn cert_store(&self) -> Arc<CertStore> {
-        self.cert_store.clone()
-    }
-
-    /// Get the challenge store for HTTP-01 validation
-    pub fn challenge_store(&self) -> Arc<ChallengeStore> {
-        self.challenge_store.clone()
-    }
-
-    /// Get renewal before days config
     pub fn renew_before_days(&self) -> u32 {
         self.config.renew_before_days
     }
 
+    pub fn domains(&self) -> &[String] {
+        &self.config.domains
+    }
+
+    pub fn current_cert(&self) -> Option<Arc<CertKeyPair>> {
+        self.config
+            .domains
+            .iter()
+            .find_map(|domain| self.cert_store.get_for_domain(domain))
+            .or_else(|| (**self.cert_store.load()).clone())
+    }
+
+    pub fn needs_certificate(&self) -> bool {
+        match self.current_cert() {
+            Some(cert) => cert.needs_renewal(self.renew_before_days()),
+            None => true,
+        }
+    }
+
     /// Try to load existing certificate from disk
-    pub async fn load_existing_cert(
+    pub fn load_existing_cert(
         &self,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Option<CertKeyPair>, Box<dyn std::error::Error + Send + Sync>> {
         let cert_path = format!("{}/cert.pem", self.config.cert_dir);
         let key_path = format!("{}/key.pem", self.config.cert_dir);
 
@@ -380,7 +373,7 @@ impl CertificateManager {
                         info!(
                             "Existing certificate does not cover all configured domains, renewal needed"
                         );
-                        return Ok(false);
+                        return Ok(None);
                     }
                     
                     if !cert_pair.needs_renewal(self.config.renew_before_days) {
@@ -388,8 +381,7 @@ impl CertificateManager {
                             "Loaded existing certificate, expires at: {}",
                             cert_pair.expires_at
                         );
-                        self.cert_store.store(cert_pair);
-                        return Ok(true);
+                        return Ok(Some(cert_pair));
                     } else {
                         info!("Existing certificate needs renewal");
                         // If certificate is still valid (not expired), load it anyway
@@ -399,8 +391,7 @@ impl CertificateManager {
                                 "Loaded existing certificate (needing renewal), expires at: {}",
                                 cert_pair.expires_at
                             );
-                            self.cert_store.store(cert_pair);
-                            return Ok(true);
+                            return Ok(Some(cert_pair));
                         }
                     }
                 }
@@ -409,7 +400,7 @@ impl CertificateManager {
                 }
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Initialize or load ACME account
@@ -622,38 +613,63 @@ impl CertificateManager {
         );
 
         // Update cert store (hot-reload)
-        self.cert_store.store(cert_pair.clone());
+        self.cert_store
+            .store_for_domains(&self.config.domains, cert_pair.clone());
 
         Ok(cert_pair)
     }
+}
 
-    /// Start background renewal task
-    pub fn start_renewal_task(manager: Arc<tokio::sync::Mutex<Self>>) {
-        tokio::spawn(async move {
-            loop {
-                // Check every hour
-                sleep(std::time::Duration::from_secs(3600)).await;
+pub struct AcmeBackgroundService {
+    managers: Vec<Arc<tokio::sync::Mutex<CertificateManager>>>,
+}
 
-                let mut mgr = manager.lock().await;
-                let renew_before_days = mgr.renew_before_days();
-                let needs_renewal = {
-                    let cert_guard = mgr.cert_store.load();
-                    match &**cert_guard {
-                        Some(cert) => cert.needs_renewal(renew_before_days),
-                        None => true,
-                    }
-                };
+impl AcmeBackgroundService {
+    pub fn new(managers: Vec<Arc<tokio::sync::Mutex<CertificateManager>>>) -> Self {
+        Self { managers }
+    }
 
-                if needs_renewal {
-                    info!("Certificate renewal check: renewal needed");
-                    match mgr.request_certificate().await {
-                        Ok(_) => info!("Certificate renewed successfully"),
-                        Err(e) => error!("Certificate renewal failed: {}", e),
-                    }
-                } else {
-                    debug!("Certificate renewal check: no renewal needed");
+    async fn process_due_certificates(&self) {
+        for manager in &self.managers {
+            let mut mgr = manager.lock().await;
+            let domains = mgr.domains().to_vec();
+
+            if mgr.needs_certificate() {
+                info!("ACME renewal check: certificate needed for {:?}", domains);
+                match mgr.request_certificate().await {
+                    Ok(_) => info!("ACME certificate updated for {:?}", domains),
+                    Err(e) => error!("ACME certificate update failed for {:?}: {}", domains, e),
+                }
+            } else {
+                debug!("ACME renewal check: certificate still valid for {:?}", domains);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BackgroundService for AcmeBackgroundService {
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        tokio::select! {
+            _ = sleep(std::time::Duration::from_secs(5)) => {}
+            _ = shutdown.changed() => {
+                info!("ACME background service shutting down before initial certificate check");
+                return;
+            }
+        }
+
+        self.process_due_certificates().await;
+
+        loop {
+            tokio::select! {
+                _ = sleep(std::time::Duration::from_secs(3600)) => {
+                    self.process_due_certificates().await;
+                }
+                _ = shutdown.changed() => {
+                    info!("ACME background service shutting down");
+                    return;
                 }
             }
-        });
+        }
     }
 }

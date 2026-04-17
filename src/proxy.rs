@@ -5,6 +5,7 @@ use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 use crate::acme::ChallengeStore;
@@ -19,6 +20,13 @@ pub struct ProxyService {
 }
 
 impl ProxyService {
+    const DOWNSTREAM_KEEPALIVE_SECS: u64 = 15;
+    const UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 3;
+    const UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS: u64 = 10;
+    const UPSTREAM_IO_TIMEOUT_SECS: u64 = 30;
+    const LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = 5;
+    const REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = 15;
+
     /// Create a new proxy service with the given configuration
     pub fn new(config: Arc<Config>, is_tls: bool, challenge_store: Arc<ChallengeStore>) -> Self {
         Self { config, is_tls, challenge_store }
@@ -112,6 +120,10 @@ impl ProxyHttp for ProxyService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<bool, Box<pingora::Error>> {
+        session
+            .as_downstream_mut()
+            .set_keepalive(Some(Self::DOWNSTREAM_KEEPALIVE_SECS));
+
         let req_header = session.req_header();
         let path = req_header.uri.path();
 
@@ -171,7 +183,7 @@ impl ProxyHttp for ProxyService {
             path,
             self.is_tls
         );
-        info!("Request headers: {:?}", req_header.headers);
+        debug!("Request headers: {:?}", req_header.headers);
 
         // Find matching route
         let route = self.config.find_route(&hosts, path);
@@ -269,6 +281,19 @@ impl ProxyHttp for ProxyService {
         );
 
         let mut peer = HttpPeer::new((host.as_str(), port), use_tls, host.clone());
+        peer.options.connection_timeout =
+            Some(Duration::from_secs(Self::UPSTREAM_CONNECT_TIMEOUT_SECS));
+        peer.options.total_connection_timeout =
+            Some(Duration::from_secs(Self::UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS));
+        peer.options.read_timeout = Some(Duration::from_secs(Self::UPSTREAM_IO_TIMEOUT_SECS));
+        peer.options.write_timeout = Some(Duration::from_secs(Self::UPSTREAM_IO_TIMEOUT_SECS));
+        peer.options.idle_timeout = Some(Duration::from_secs(if host == "127.0.0.1"
+            || host == "localhost"
+        {
+            Self::LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS
+        } else {
+            Self::REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS
+        }));
 
         // Configure for HTTP/2 if gRPC
         if is_grpc {
@@ -502,4 +527,3 @@ mod tests {
         assert_eq!(u.query(), Some("query=1"));
     }
 }
-

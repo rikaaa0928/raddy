@@ -11,7 +11,7 @@ use pingora::prelude::*;
 static GLOBAL: MiMalloc = MiMalloc;
 use std::sync::Arc;
 
-use acme::{CertKeyPair, CertStore, CertificateManager, ChallengeStore};
+use acme::{AcmeBackgroundService, CertKeyPair, CertStore, CertificateManager, ChallengeStore};
 use config::Config;
 use proxy::ProxyService;
 use tls::DynamicCert;
@@ -92,12 +92,10 @@ fn main() {
         );
     }
 
-    // Create tokio runtime for async operations
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-
     // Initialize certificate store and challenge store for ACME
     let cert_store = Arc::new(CertStore::new());
     let challenge_store = Arc::new(ChallengeStore::new());
+    let mut acme_managers = Vec::new();
 
     // Handle TLS configuration
     if let Some(tls_certs) = &config.listen.tls {
@@ -119,100 +117,26 @@ fn main() {
                     
                     // Create AcmeManagerConfig from source
                     let acme_config = acme::AcmeManagerConfig::from_source(acme_source, domains.clone());
-                    
-                    let cert_store_clone = cert_store.clone();
-                    let challenge_store_clone = challenge_store.clone();
-                    let domains_for_store = domains.clone();
-                    
-                    rt.block_on(async {
-                        let manager = CertificateManager::new(
-                            acme_config.clone(),
-                            cert_store_clone.clone(),
-                            challenge_store_clone,
-                        )
-                        .await
-                        .expect("Failed to create certificate manager");
+                    let manager = CertificateManager::new(
+                        acme_config.clone(),
+                        cert_store.clone(),
+                        challenge_store.clone(),
+                    );
 
-                        // Try to load existing certificate
-                        let has_cert = manager
-                            .load_existing_cert()
-                            .await
-                            .unwrap_or_else(|e| {
-                                warn!("Failed to load existing certificate for {:?}: {}", domains_for_store, e);
-                                false
-                            });
-
-                        if has_cert {
-                            // Store certificate for these domains
-                            if let Some(cert) = (**manager.cert_store().load()).clone() {
-                                cert_store_clone.store_for_domains(&domains_for_store, cert);
-                            }
-                        } else {
-                            // Generate temporary self-signed cert
-                            info!("No valid certificate found for {:?}, will request after server starts", domains_for_store);
-                            
-                            let temp_cert = generate_temp_cert(&domains_for_store)
-                                .expect("Failed to generate temporary certificate");
-                            
-                            std::fs::create_dir_all(&acme_config.cert_dir)
-                                .expect("Failed to create cert directory");
-                            
-                            let cert_path = format!("{}/cert.pem", acme_config.cert_dir);
-                            let key_path = format!("{}/key.pem", acme_config.cert_dir);
-                            
-                            temp_cert.save_to_files(&cert_path, &key_path)
-                                .expect("Failed to save temporary certificate");
-                            
-                            cert_store_clone.store_for_domains(&domains_for_store, temp_cert.clone());
-                            manager.cert_store().store(temp_cert);
+                    match manager.load_existing_cert() {
+                        Ok(Some(cert)) => {
+                            cert_store.store_for_domains(&domains, cert);
                         }
-                    });
-                    
-                    // Start background ACME renewal task for this configuration
-                    let acme_config_for_task = acme::AcmeManagerConfig::from_source(acme_source, domains.clone());
-                    let cert_store_for_task = cert_store.clone();
-                    let challenge_store_for_task = challenge_store.clone();
-                    let domains_for_task = domains.clone();
-                    
-                    rt.spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        
-                        let manager = Arc::new(tokio::sync::Mutex::new(
-                            CertificateManager::new(
-                                acme_config_for_task,
-                                cert_store_for_task.clone(),
-                                challenge_store_for_task,
-                            )
-                            .await
-                            .expect("Failed to create certificate manager for renewal"),
-                        ));
-
-                        // Check if we need to request initial certificate
-                        {
-                            let mut mgr = manager.lock().await;
-                            let renew_days = mgr.renew_before_days();
-                            let cert_guard = mgr.cert_store().load();
-                            let needs_real_cert = match &**cert_guard {
-                                Some(cert) => cert.needs_renewal(renew_days),
-                                None => true,
-                            };
-                            drop(cert_guard);
-
-                            if needs_real_cert {
-                                info!("Requesting initial ACME certificate for {:?}...", domains_for_task);
-                                match mgr.request_certificate().await {
-                                    Ok(cert) => {
-                                        info!("Initial ACME certificate obtained successfully for {:?}", domains_for_task);
-                                        cert_store_for_task.store_for_domains(&domains_for_task, cert);
-                                    }
-                                    Err(e) => error!("Failed to obtain initial ACME certificate for {:?}: {}", domains_for_task, e),
-                                }
-                            }
+                        Ok(None) => {
+                            provision_temp_cert(&acme_config.cert_dir, &domains, &cert_store);
                         }
+                        Err(e) => {
+                            warn!("Failed to load existing certificate for {:?}: {}", domains, e);
+                            provision_temp_cert(&acme_config.cert_dir, &domains, &cert_store);
+                        }
+                    }
 
-                        // Start renewal task
-                        CertificateManager::start_renewal_task(manager);
-                    });
+                    acme_managers.push(Arc::new(tokio::sync::Mutex::new(manager)));
                 }
                 config::CertSource::File(file_source) => {
                     info!("  Source: Static file (cert: {}, key: {})", file_source.cert_path, file_source.key_path);
@@ -273,6 +197,13 @@ fn main() {
         }
     }
 
+    if !acme_managers.is_empty() {
+        server.add_service(background_service(
+            "acme renewal",
+            AcmeBackgroundService::new(acme_managers),
+        ));
+    }
+
     // Run the server
     server.run_forever();
 }
@@ -305,4 +236,25 @@ fn generate_temp_cert(domains: &[String]) -> Result<CertKeyPair, Box<dyn std::er
         key_pem,
         expires_at,
     })
+}
+
+fn provision_temp_cert(cert_dir: &str, domains: &[String], cert_store: &Arc<CertStore>) {
+    info!(
+        "No valid certificate found for {:?}, will request after server starts",
+        domains
+    );
+
+    let temp_cert =
+        generate_temp_cert(domains).expect("Failed to generate temporary certificate");
+
+    std::fs::create_dir_all(cert_dir).expect("Failed to create cert directory");
+
+    let cert_path = format!("{}/cert.pem", cert_dir);
+    let key_path = format!("{}/key.pem", cert_dir);
+
+    temp_cert
+        .save_to_files(&cert_path, &key_path)
+        .expect("Failed to save temporary certificate");
+
+    cert_store.store_for_domains(domains, temp_cert);
 }
