@@ -13,7 +13,7 @@ Raddy is a high-performance, lightweight reverse proxy built on [Cloudflare Ping
 - **Per-Domain TLS**: Flexible per-domain certificate configuration with SNI-based certificate selection.
 - **Multi-Host Routing**: Route configuration supports matching multiple hosts for the same upstream.
 - **Flexible Routing**: Route requests based on hostnames and path prefixes.
-- **Custom Headers**: Easy configuration for adding or overriding request headers.
+- **Custom Headers**: Easy configuration for adding or overriding request headers, including `$host` variable expansion.
 - **High Performance**: Uses MiMalloc allocator for optimal memory performance.
 
 ## Installation
@@ -90,6 +90,7 @@ routes:
       protocol: http
     force_https_redirect: true
     headers:
+      Host: "$host"
       X-Custom-Header: "Raddy-Proxy"
 
   # gRPC with TLS
@@ -158,6 +159,20 @@ routes:
 ```
 
 When `rewrite` is configured, the transformed path is used. The `pattern` is a standard Regex, and `to` is the replacement string which supports capture groups (e.g., `$1`).
+
+### Header Variables
+
+Header values support simple request-derived variables:
+
+- `$host`: original request host, falling back to HTTP/2 `:authority`
+- `$http_host`: alias of `$host`
+
+To preserve the downstream `Host` header when proxying, set:
+
+```yaml
+headers:
+  Host: "$host"
+```
 
 ### Upstream Protocols
 

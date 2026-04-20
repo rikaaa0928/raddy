@@ -29,7 +29,11 @@ impl ProxyService {
 
     /// Create a new proxy service with the given configuration
     pub fn new(config: Arc<Config>, is_tls: bool, challenge_store: Arc<ChallengeStore>) -> Self {
-        Self { config, is_tls, challenge_store }
+        Self {
+            config,
+            is_tls,
+            challenge_store,
+        }
     }
 
     /// Parse upstream URL and return host, port, and whether to use TLS
@@ -58,38 +62,78 @@ impl ProxyService {
         Ok((host.to_string(), port, use_tls))
     }
 
-    /// Rewrite the path based on the route configuration
+    /// Rewrite the URI based on the route configuration
     /// Returns Some(new_uri) if rewriting occurred, None otherwise
-    fn rewrite_path(uri: &http::Uri, route: &RouteConfig) -> Result<Option<http::Uri>, Box<pingora::Error>> {
+    fn rewrite_uri(
+        uri: &http::Uri,
+        route: &RouteConfig,
+    ) -> Result<Option<http::Uri>, Box<pingora::Error>> {
+        let mut rewritten = false;
+        let mut parts = uri.clone().into_parts();
+
+        let path = uri.path();
+        let mut new_path = path.to_string();
         if let (Some(regex), Some(rewrite)) = (&route.rewrite_regex, &route.rewrite) {
-            let path = uri.path();
-            let new_path = regex.replace(path, &rewrite.to);
-
-            if new_path != path {
-                debug!("Rewriting path {} -> {}", path, new_path);
-                let mut parts = uri.clone().into_parts();
-                let new_path_and_query = if let Some(query) = uri.query() {
-                    format!("{}?{}", new_path, query)
-                } else {
-                    new_path.to_string()
-                };
-
-                let new_path_and_query = new_path_and_query.parse().map_err(|e| {
-                    error!("Invalid rewritten path: {}", e);
-                    pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
-                })?;
-                
-                parts.path_and_query = Some(new_path_and_query);
-
-                let new_uri = http::Uri::from_parts(parts).map_err(|e| {
-                    error!("Failed to build URI: {}", e);
-                    pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
-                })?;
-                
-                return Ok(Some(new_uri));
+            let res = regex.replace(path, &rewrite.to);
+            if res != path {
+                new_path = res.to_string();
+                rewritten = true;
             }
         }
-        Ok(None)
+
+        let had_query = uri.query().is_some();
+        let query = uri.query().unwrap_or("");
+        let mut new_query = query.to_string();
+        if let (Some(regex), Some(rewrite)) = (&route.rewrite_query_regex, &route.rewrite_query) {
+            let res = regex.replace(query, &rewrite.to);
+            if res != query {
+                new_query = res.to_string();
+                rewritten = true;
+            }
+        }
+
+        if rewritten {
+            let has_query_component = had_query || !new_query.is_empty();
+            let path_and_query = if has_query_component {
+                format!("{}?{}", new_path, new_query)
+            } else {
+                new_path
+            };
+
+            parts.path_and_query = Some(path_and_query.parse().map_err(|e| {
+                error!("Invalid rewritten path and query: {}", e);
+                pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+            })?);
+
+            let new_uri = http::Uri::from_parts(parts).map_err(|e| {
+                error!("Failed to build URI: {}", e);
+                pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+            })?;
+            Ok(Some(new_uri))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn original_host(request: &RequestHeader) -> Option<String> {
+        request
+            .headers
+            .get_all("host")
+            .iter()
+            .find_map(|value| value.to_str().ok().map(str::to_owned))
+            .or_else(|| {
+                request
+                    .headers
+                    .get(":authority")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .or_else(|| request.uri.host().map(str::to_owned))
+    }
+
+    fn expand_header_value(template: &str, host: Option<&str>) -> String {
+        let host = host.unwrap_or("");
+        template.replace("$http_host", host).replace("$host", host)
     }
 }
 
@@ -131,24 +175,30 @@ impl ProxyHttp for ProxyService {
         if path.starts_with("/.well-known/acme-challenge/") {
             let token = path.trim_start_matches("/.well-known/acme-challenge/");
             info!("ACME HTTP-01 challenge request for token: {}", token);
-            
+
             if let Some(key_auth) = self.challenge_store.get(token).await {
                 info!("Responding to ACME challenge with key authorization");
                 let mut header = pingora::http::ResponseHeader::build(200, None)?;
                 header.insert_header("Content-Type", "text/plain")?;
                 header.insert_header("Content-Length", key_auth.len().to_string())?;
-                
-                session.write_response_header(Box::new(header), false).await?;
-                session.write_response_body(Some(key_auth.into()), true).await?;
+
+                session
+                    .write_response_header(Box::new(header), false)
+                    .await?;
+                session
+                    .write_response_body(Some(key_auth.into()), true)
+                    .await?;
                 return Ok(true); // Request handled
             } else {
                 warn!("ACME challenge token not found: {}", token);
                 let header = pingora::http::ResponseHeader::build(404, Some(1))?;
-                session.write_response_header(Box::new(header), true).await?;
+                session
+                    .write_response_header(Box::new(header), true)
+                    .await?;
                 return Ok(true); // Request handled
             }
         }
-        
+
         // Get host(s) from request
         // Check both 'host' header (HTTP/1.1) and ':authority' pseudo-header (HTTP/2/gRPC)
         let mut hosts: Vec<&str> = req_header
@@ -157,7 +207,7 @@ impl ProxyHttp for ProxyService {
             .iter()
             .filter_map(|v| v.to_str().ok())
             .collect();
-        
+
         // For HTTP/2 (gRPC), also check the :authority pseudo-header
         if hosts.is_empty() {
             if let Some(authority) = req_header.headers.get(":authority") {
@@ -166,7 +216,7 @@ impl ProxyHttp for ProxyService {
                 }
             }
         }
-        
+
         // Also try to get host from URI authority if still empty
         if hosts.is_empty() {
             if let Some(host) = req_header.uri.host() {
@@ -179,44 +229,55 @@ impl ProxyHttp for ProxyService {
 
         info!(
             "Processing request: hosts={:?}, path={}, is_tls={}",
-            hosts,
-            path,
-            self.is_tls
+            hosts, path, self.is_tls
         );
         debug!("Request headers: {:?}", req_header.headers);
 
         // Find matching route
         let route = self.config.find_route(&hosts, path);
-        
+
         // Check for redirect if not TLS
         if !self.is_tls {
             let should_redirect = if let Some(r) = &route {
-                r.force_https_redirect.unwrap_or(self.config.listen.force_https_redirect)
+                r.force_https_redirect
+                    .unwrap_or(self.config.listen.force_https_redirect)
             } else {
                 self.config.listen.force_https_redirect
             };
 
             if should_redirect {
                 let https_port = self.config.listen.https_port.unwrap_or(443);
-                
+
                 // Construct redirect URL
-                let host_str = hosts.first().copied().unwrap_or("localhost").split(':').next().unwrap_or("localhost");
+                let host_str = hosts
+                    .first()
+                    .copied()
+                    .unwrap_or("localhost")
+                    .split(':')
+                    .next()
+                    .unwrap_or("localhost");
                 let port_str = if https_port == 443 {
                     "".to_string()
                 } else {
                     format!(":{}", https_port)
                 };
-                
-                let uri = req_header.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+                let uri = req_header
+                    .uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/");
                 let location = format!("https://{}{}{}", host_str, port_str, uri);
-                
+
                 info!("Redirecting HTTP request to: {}", location);
-                
+
                 let mut header = pingora::http::ResponseHeader::build(301, Some(4))?;
                 header.insert_header("Location", location)?;
                 header.insert_header("Connection", "Close")?;
-                
-                session.write_response_header(Box::new(header), true).await?;
+
+                session
+                    .write_response_header(Box::new(header), true)
+                    .await?;
                 return Ok(true); // Short-circuit, request handled
             }
         }
@@ -224,7 +285,7 @@ impl ProxyHttp for ProxyService {
         // If no route found (and no redirect happening), we will fail in upstream_peer
         // But we store what we found
         if let Some(r) = route {
-           ctx.route = Some(r.clone());
+            ctx.route = Some(r.clone());
         }
 
         Ok(false)
@@ -238,16 +299,16 @@ impl ProxyHttp for ProxyService {
     ) -> Result<Box<HttpPeer>, Box<pingora::Error>> {
         // Route should have been found in request_filter
         let route = ctx.route.as_ref().ok_or_else(|| {
-             let req_header = session.req_header();
-             warn!("No route found for path={}", req_header.uri.path());
-             pingora::Error::new(pingora::ErrorType::ConnectNoRoute)
+            let req_header = session.req_header();
+            warn!("No route found for path={}", req_header.uri.path());
+            pingora::Error::new(pingora::ErrorType::ConnectNoRoute)
         })?;
 
         info!(
             "Routing to upstream: hosts={:?}, path_prefix={:?}, upstream={}",
             route.hosts, route.path_prefix, route.upstream.url
         );
-        
+
         let req_header = session.req_header();
 
         // Check for WebSocket upgrade
@@ -283,17 +344,18 @@ impl ProxyHttp for ProxyService {
         let mut peer = HttpPeer::new((host.as_str(), port), use_tls, host.clone());
         peer.options.connection_timeout =
             Some(Duration::from_secs(Self::UPSTREAM_CONNECT_TIMEOUT_SECS));
-        peer.options.total_connection_timeout =
-            Some(Duration::from_secs(Self::UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS));
+        peer.options.total_connection_timeout = Some(Duration::from_secs(
+            Self::UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS,
+        ));
         peer.options.read_timeout = Some(Duration::from_secs(Self::UPSTREAM_IO_TIMEOUT_SECS));
         peer.options.write_timeout = Some(Duration::from_secs(Self::UPSTREAM_IO_TIMEOUT_SECS));
-        peer.options.idle_timeout = Some(Duration::from_secs(if host == "127.0.0.1"
-            || host == "localhost"
-        {
-            Self::LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS
-        } else {
-            Self::REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS
-        }));
+        peer.options.idle_timeout = Some(Duration::from_secs(
+            if host == "127.0.0.1" || host == "localhost" {
+                Self::LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS
+            } else {
+                Self::REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS
+            },
+        ));
 
         // Configure for HTTP/2 if gRPC
         if is_grpc {
@@ -312,8 +374,8 @@ impl ProxyHttp for ProxyService {
     ) -> Result<(), Box<pingora::Error>> {
         // Set proper Host header for upstream
         if let Some(route) = &ctx.route {
-            // Apply path rewrite if configured
-            if let Some(new_uri) = Self::rewrite_path(&upstream_request.uri, route)? {
+            // Apply path/query rewrite if configured
+            if let Some(new_uri) = Self::rewrite_uri(&upstream_request.uri, route)? {
                 upstream_request.set_uri(new_uri);
             }
 
@@ -334,30 +396,35 @@ impl ProxyHttp for ProxyService {
 
                     debug!("Set upstream Host header to: {}", host_value);
                 }
+            }
 
+            if let Ok(parsed) = Url::parse(&route.upstream.url) {
                 // Rewrite URI path to include upstream path
                 let upstream_path = parsed.path();
                 if !upstream_path.is_empty() && upstream_path != "/" {
                     let original_uri = &upstream_request.uri;
                     let original_path = original_uri.path();
                     let original_query = original_uri.query();
-                    
+
                     // Combine upstream path with request path
                     let new_path = if original_path == "/" {
                         upstream_path.to_string()
                     } else {
                         format!("{}{}", upstream_path.trim_end_matches('/'), original_path)
                     };
-                    
+
                     // Build path_and_query string
                     let path_and_query = if let Some(query) = original_query {
                         format!("{}?{}", new_path, query)
                     } else {
                         new_path
                     };
-                    
-                    debug!("Rewriting URI path from {} to {}", original_path, path_and_query);
-                    
+
+                    debug!(
+                        "Rewriting URI path from {} to {}",
+                        original_path, path_and_query
+                    );
+
                     // Build new URI
                     let new_uri = http::uri::Uri::builder()
                         .path_and_query(path_and_query.as_str())
@@ -366,32 +433,36 @@ impl ProxyHttp for ProxyService {
                             error!("Failed to build new URI: {}", e);
                             pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
                         })?;
-                    
+
                     upstream_request.set_uri(new_uri);
                 }
             }
 
             // Apply custom headers from route configuration
+            let original_host = Self::original_host(session.req_header());
             for (key, value) in &route.headers {
+                let expanded_value = Self::expand_header_value(value, original_host.as_deref());
+
                 // Create owned HeaderName and HeaderValue
-                let header_name = http::header::HeaderName::from_bytes(key.as_bytes())
-                    .map_err(|e| {
+                let header_name =
+                    http::header::HeaderName::from_bytes(key.as_bytes()).map_err(|e| {
                         error!("Invalid header name '{}': {}", key, e);
                         pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
                     })?;
-                let header_value = http::header::HeaderValue::from_bytes(value.as_bytes())
+                let header_value = http::header::HeaderValue::from_bytes(expanded_value.as_bytes())
                     .map_err(|e| {
                         error!("Invalid header value for '{}': {}", key, e);
                         pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
                     })?;
-                
+
                 // Use insert_header method with owned values
-                upstream_request.insert_header(header_name, header_value)
+                upstream_request
+                    .insert_header(header_name, header_value)
                     .map_err(|e| {
                         error!("Failed to insert header '{}': {}", key, e);
                         pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
                     })?;
-                debug!("Set custom header: {} = {}", key, value);
+                debug!("Set custom header: {} = {}", key, expanded_value);
             }
         }
 
@@ -399,32 +470,44 @@ impl ProxyHttp for ProxyService {
         if ctx.is_websocket {
             debug!("WebSocket request, preserving upgrade headers");
             if !upstream_request.headers.contains_key("Upgrade") {
-                 debug!("Adding missing Upgrade headers for WebSocket");
-                 upstream_request.insert_header("Connection", "Upgrade").map_err(|e| {
-                     error!("Failed to set Connection header: {}", e);
-                     pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
-                 })?;
-                 upstream_request.insert_header("Upgrade", "websocket").map_err(|e| {
-                     error!("Failed to set Upgrade header: {}", e);
-                     pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
-                 })?;
+                debug!("Adding missing Upgrade headers for WebSocket");
+                upstream_request
+                    .insert_header("Connection", "Upgrade")
+                    .map_err(|e| {
+                        error!("Failed to set Connection header: {}", e);
+                        pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+                    })?;
+                upstream_request
+                    .insert_header("Upgrade", "websocket")
+                    .map_err(|e| {
+                        error!("Failed to set Upgrade header: {}", e);
+                        pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+                    })?;
             }
-            
+
             // Also copy Sec-WebSocket-Key and Version if missing
-            let ws_headers = ["Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol"];
+            let ws_headers = [
+                "Sec-WebSocket-Key",
+                "Sec-WebSocket-Version",
+                "Sec-WebSocket-Extensions",
+                "Sec-WebSocket-Protocol",
+            ];
             for header in ws_headers {
                 if !upstream_request.headers.contains_key(header) {
-                     if let Some(value) = session.req_header().headers.get(header) {
-                         debug!("Copying header {} for WebSocket", header);
-                         upstream_request.insert_header(header, value).map_err(|e| {
-                             error!("Failed to copy header {}: {}", header, e);
-                             pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
-                         })?;
-                     }
+                    if let Some(value) = session.req_header().headers.get(header) {
+                        debug!("Copying header {} for WebSocket", header);
+                        upstream_request.insert_header(header, value).map_err(|e| {
+                            error!("Failed to copy header {}: {}", header, e);
+                            pingora::Error::new(pingora::ErrorType::InvalidHTTPHeader)
+                        })?;
+                    }
                 }
             }
-            
-            debug!("Upstream Headers for WebSocket: {:?}", upstream_request.headers);
+
+            debug!(
+                "Upstream Headers for WebSocket: {:?}",
+                upstream_request.headers
+            );
         }
 
         // For gRPC, ensure proper content-type
@@ -436,10 +519,10 @@ impl ProxyHttp for ProxyService {
         if let Some(client_addr) = session.client_addr() {
             if let Some(ip) = client_addr.as_inet() {
                 let ip_str = ip.ip().to_string();
-                
+
                 // Set X-Real-IP
                 let _ = upstream_request.insert_header("X-Real-IP", ip_str.clone());
-                
+
                 // Set or append to X-Forwarded-For
                 if let Some(existing_xff) = session.req_header().headers.get("X-Forwarded-For") {
                     if let Ok(xff_str) = existing_xff.to_str() {
@@ -452,6 +535,22 @@ impl ProxyHttp for ProxyService {
             }
         }
 
+        Ok(())
+    }
+
+    /// Modify response headers from upstream before sending to downstream
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut pingora::http::ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<(), Box<pingora::Error>> {
+        if let Some(route) = &ctx.route {
+            for header_name in &route.hide_headers {
+                upstream_response.remove_header(header_name);
+                debug!("Removed response header: {}", header_name);
+            }
+        }
         Ok(())
     }
 
@@ -487,10 +586,10 @@ mod tests {
     use crate::config::{RewriteConfig, UpstreamConfig};
 
     #[test]
-    fn test_rewrite_path() {
+    fn test_rewrite_uri() {
         let pattern = "^/api/(.*)$";
         let regex = regex::Regex::new(pattern).unwrap();
-        
+
         let route = RouteConfig {
             hosts: None,
             path_prefix: None,
@@ -499,31 +598,72 @@ mod tests {
                 protocol: Protocol::Http,
             },
             headers: Default::default(),
+            hide_headers: Default::default(),
             force_https_redirect: None,
             rewrite: Some(RewriteConfig {
                 pattern: pattern.to_string(),
                 to: "/v1/$1".to_string(),
             }),
             rewrite_regex: Some(regex),
+            rewrite_query: None,
+            rewrite_query_regex: None,
         };
-        
+
         // Test match
         let uri = "/api/users".parse::<http::Uri>().unwrap();
-        let new_uri = ProxyService::rewrite_path(&uri, &route).unwrap();
+        let new_uri = ProxyService::rewrite_uri(&uri, &route).unwrap();
         assert!(new_uri.is_some());
         assert_eq!(new_uri.unwrap().path(), "/v1/users");
-        
+
         // Test no match
         let uri = "/other/users".parse::<http::Uri>().unwrap();
-        let new_uri = ProxyService::rewrite_path(&uri, &route).unwrap();
+        let new_uri = ProxyService::rewrite_uri(&uri, &route).unwrap();
         assert!(new_uri.is_none());
-        
+
         // Test query preservation
         let uri = "/api/users?query=1".parse::<http::Uri>().unwrap();
-        let new_uri = ProxyService::rewrite_path(&uri, &route).unwrap();
+        let new_uri = ProxyService::rewrite_uri(&uri, &route).unwrap();
         assert!(new_uri.is_some());
         let u = new_uri.unwrap();
         assert_eq!(u.path(), "/v1/users");
         assert_eq!(u.query(), Some("query=1"));
+
+        // Test empty query preservation
+        let uri = "/api/users?".parse::<http::Uri>().unwrap();
+        let new_uri = ProxyService::rewrite_uri(&uri, &route).unwrap();
+        assert!(new_uri.is_some());
+        let u = new_uri.unwrap();
+        assert_eq!(u.path(), "/v1/users");
+        assert_eq!(u.query(), Some(""));
+
+        // Test query rewrite
+        let mut route_q = route.clone();
+        let q_pattern = "^(.*)scope=repository%3A(.*)$";
+        route_q.rewrite_query = Some(RewriteConfig {
+            pattern: q_pattern.to_string(),
+            to: "${1}scope=repository%3Adocker-io%2F${2}".to_string(),
+        });
+        route_q.rewrite_query_regex = Some(regex::Regex::new(q_pattern).unwrap());
+
+        let uri = "/service/token?scope=repository%3Aimage"
+            .parse::<http::Uri>()
+            .unwrap();
+        let new_uri = ProxyService::rewrite_uri(&uri, &route_q).unwrap();
+        assert!(new_uri.is_some());
+        let u = new_uri.unwrap();
+        assert_eq!(u.query(), Some("scope=repository%3Adocker-io%2Fimage"));
+    }
+
+    #[test]
+    fn test_expand_header_value() {
+        assert_eq!(
+            ProxyService::expand_header_value("$host", Some("example.com")),
+            "example.com"
+        );
+        assert_eq!(
+            ProxyService::expand_header_value("https://$http_host/api", Some("example.com:8443")),
+            "https://example.com:8443/api"
+        );
+        assert_eq!(ProxyService::expand_header_value("$host", None), "");
     }
 }

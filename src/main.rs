@@ -54,7 +54,10 @@ fn main() {
             }
             if target_dir.exists() {
                 if let Err(e) = std::env::set_current_dir(&target_dir) {
-                    warn!("Failed to change working directory to {:?}: {}", target_dir, e);
+                    warn!(
+                        "Failed to change working directory to {:?}: {}",
+                        target_dir, e
+                    );
                 } else {
                     info!("Changed working directory to {:?}", target_dir);
                 }
@@ -84,11 +87,7 @@ fn main() {
     for (i, route) in config.routes.iter().enumerate() {
         info!(
             "  Route {}: hosts={:?}, path_prefix={:?} -> {} ({:?})",
-            i,
-            route.hosts,
-            route.path_prefix,
-            route.upstream.url,
-            route.upstream.protocol
+            i, route.hosts, route.path_prefix, route.upstream.url, route.upstream.protocol
         );
     }
 
@@ -103,20 +102,24 @@ fn main() {
             error!("TLS config must have at least one certificate configuration");
             std::process::exit(1);
         }
-        
-        info!("Processing {} TLS certificate configuration(s)", tls_certs.len());
-        
+
+        info!(
+            "Processing {} TLS certificate configuration(s)",
+            tls_certs.len()
+        );
+
         // Process each certificate configuration
         for cert_config in tls_certs {
             let domains = cert_config.domains.clone();
             info!("Processing certificate for domains: {:?}", domains);
-            
+
             match &cert_config.source {
                 config::CertSource::Acme(acme_source) => {
                     info!("  Source: ACME (email: {})", acme_source.email);
-                    
+
                     // Create AcmeManagerConfig from source
-                    let acme_config = acme::AcmeManagerConfig::from_source(acme_source, domains.clone());
+                    let acme_config =
+                        acme::AcmeManagerConfig::from_source(acme_source, domains.clone());
                     let manager = CertificateManager::new(
                         acme_config.clone(),
                         cert_store.clone(),
@@ -131,7 +134,10 @@ fn main() {
                             provision_temp_cert(&acme_config.cert_dir, &domains, &cert_store);
                         }
                         Err(e) => {
-                            warn!("Failed to load existing certificate for {:?}: {}", domains, e);
+                            warn!(
+                                "Failed to load existing certificate for {:?}: {}",
+                                domains, e
+                            );
                             provision_temp_cert(&acme_config.cert_dir, &domains, &cert_store);
                         }
                     }
@@ -139,10 +145,16 @@ fn main() {
                     acme_managers.push(Arc::new(tokio::sync::Mutex::new(manager)));
                 }
                 config::CertSource::File(file_source) => {
-                    info!("  Source: Static file (cert: {}, key: {})", file_source.cert_path, file_source.key_path);
-                    
+                    info!(
+                        "  Source: Static file (cert: {}, key: {})",
+                        file_source.cert_path, file_source.key_path
+                    );
+
                     // Load static certificate and store for these domains
-                    match CertKeyPair::load_from_files(&file_source.cert_path, &file_source.key_path) {
+                    match CertKeyPair::load_from_files(
+                        &file_source.cert_path,
+                        &file_source.key_path,
+                    ) {
                         Ok(cert_pair) => {
                             cert_store.store_for_domains(&domains, cert_pair);
                             info!("Loaded static certificate for domains: {:?}", domains);
@@ -185,9 +197,10 @@ fn main() {
 
             // Use dynamic certificate callback for TLS with SNI-based selection
             let dynamic_cert = DynamicCert::new(cert_store.clone());
-            
-            let mut tls_settings = pingora::listeners::tls::TlsSettings::with_callbacks(dynamic_cert)
-                .expect("Failed to create TLS settings with callbacks");
+
+            let mut tls_settings =
+                pingora::listeners::tls::TlsSettings::with_callbacks(dynamic_cert)
+                    .expect("Failed to create TLS settings with callbacks");
             tls_settings.enable_h2();
             https_proxy.add_tls_with_settings(&addr, None, tls_settings);
             server.add_service(https_proxy);
@@ -211,26 +224,26 @@ fn main() {
 /// Generate a temporary self-signed certificate for initial server startup
 fn generate_temp_cert(domains: &[String]) -> Result<CertKeyPair, Box<dyn std::error::Error>> {
     use rcgen::{CertificateParams, KeyPair};
-    
+
     let mut params = CertificateParams::new(domains.to_vec())?;
     params.distinguished_name = rcgen::DistinguishedName::new();
-    
+
     // Set short expiration for temporary cert (1 day) so it triggers ACME renewal immediately
     // We need to set this in the certificate parameters so the generated PEM has short validity
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::hours(1);
     params.not_after = now + time::Duration::days(1);
-    
+
     let key_pair = KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
-    
+
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
-    
+
     // Temporary cert, set expiry to 1 day from now
     // This matches what we put in the certificate parameters
     let expires_at = chrono::Utc::now() + chrono::Duration::days(1);
-    
+
     Ok(CertKeyPair {
         cert_pem,
         key_pem,
@@ -244,8 +257,7 @@ fn provision_temp_cert(cert_dir: &str, domains: &[String], cert_store: &Arc<Cert
         domains
     );
 
-    let temp_cert =
-        generate_temp_cert(domains).expect("Failed to generate temporary certificate");
+    let temp_cert = generate_temp_cert(domains).expect("Failed to generate temporary certificate");
 
     std::fs::create_dir_all(cert_dir).expect("Failed to create cert directory");
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::acme::CertStore;
 
 /// Dynamic certificate provider that implements TlsAccept
-/// 
+///
 /// This struct reads certificates from a shared CertStore on each TLS handshake,
 /// enabling hot-reload of certificates when they are renewed.
 pub struct DynamicCert {
@@ -36,7 +36,7 @@ impl DynamicCert {
     }
 
     /// Create a new DynamicCert with fallback certificate files
-    /// 
+    ///
     /// The fallback certificates are used if the CertStore is empty.
     pub fn with_fallback(
         cert_store: Arc<CertStore>,
@@ -55,16 +55,16 @@ impl DynamicCert {
             fallback_key: Some(key),
         }))
     }
-
 }
 
 #[async_trait]
 impl pingora::listeners::TlsAccept for DynamicCert {
     async fn certificate_callback(&self, ssl: &mut SslRef) {
         // Extract SNI (Server Name Indication) from the SSL context
-        let sni = ssl.servername(pingora::tls::ssl::NameType::HOST_NAME)
+        let sni = ssl
+            .servername(pingora::tls::ssl::NameType::HOST_NAME)
             .map(|s| s.to_string());
-        
+
         debug!("TLS handshake with SNI: {:?}", sni);
 
         // Use pre-parsed certificate objects (parsed once at store time)
@@ -90,7 +90,11 @@ impl pingora::listeners::TlsAccept for DynamicCert {
                     error!("Failed to set private key: {}", e);
                     return;
                 }
-                debug!("Certificate callback completed successfully for SNI {:?} (chain certs: {})", sni, cert.chain_certs.len());
+                debug!(
+                    "Certificate callback completed successfully for SNI {:?} (chain certs: {})",
+                    sni,
+                    cert.chain_certs.len()
+                );
             }
             None => {
                 warn!("No certificate found for SNI {:?}, trying fallback", sni);

@@ -88,6 +88,7 @@ routes:
       protocol: http
     force_https_redirect: true
     headers:
+      Host: "$host"
       X-Custom-Header: "Raddy-Proxy"
 
   # gRPC with TLS
@@ -155,6 +156,20 @@ routes:
 ```
 
 当配置了 `rewrite` 时，使用转换后的路径。`pattern` 是标准的正则表达式，`to` 是替换字符串，支持捕获组（例如 `$1`）。
+
+### Header 变量
+
+`headers` 的值支持简单变量替换：
+
+- `$host`: 原始请求的 host，如果没有则回退到 HTTP/2 的 `:authority`
+- `$http_host`: `$host` 的别名
+
+如果你希望转发时保留下游传入的 `Host`，可以这样写：
+
+```yaml
+headers:
+  Host: "$host"
+```
 
 ### 上游协议支持
 

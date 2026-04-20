@@ -3,8 +3,8 @@
 //! This module provides automatic SSL certificate acquisition and renewal
 //! using the ACME protocol (Let's Encrypt compatible).
 
-use async_trait::async_trait;
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
@@ -64,10 +64,7 @@ impl CertKeyPair {
         let (_, cert) = x509_parser::parse_x509_certificate(pem_data.contents())?;
         let not_after = cert.validity().not_after.to_datetime();
         // Use DateTime::from_timestamp instead of deprecated from_timestamp_opt
-        Ok(
-            DateTime::from_timestamp(not_after.unix_timestamp(), 0)
-                .unwrap_or_else(|| Utc::now()),
-        )
+        Ok(DateTime::from_timestamp(not_after.unix_timestamp(), 0).unwrap_or_else(|| Utc::now()))
     }
 
     /// Save certificate and key to files
@@ -85,9 +82,9 @@ impl CertKeyPair {
     pub fn get_domains(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let pem_data = pem::parse(&self.cert_pem)?;
         let (_, cert) = x509_parser::parse_x509_certificate(pem_data.contents())?;
-        
+
         let mut domains = Vec::new();
-        
+
         // Get Subject Alternative Names
         if let Ok(Some(san)) = cert.subject_alternative_name() {
             for name in &san.value.general_names {
@@ -96,7 +93,7 @@ impl CertKeyPair {
                 }
             }
         }
-        
+
         // If no SANs, try to get CN from subject
         if domains.is_empty() {
             for rdn in cert.subject().iter_rdn() {
@@ -109,7 +106,7 @@ impl CertKeyPair {
                 }
             }
         }
-        
+
         Ok(domains)
     }
 
@@ -155,7 +152,7 @@ impl ParsedCert {
 }
 
 /// Thread-safe certificate store with atomic updates
-/// 
+///
 /// Supports domain-indexed certificate storage for SNI-based certificate selection.
 /// Certificates are parsed into OpenSSL objects once at store time and cached
 /// to avoid expensive PEM re-parsing on every TLS handshake.
@@ -246,7 +243,6 @@ impl CertStore {
     pub fn get_default_parsed(&self) -> Option<Arc<ParsedCert>> {
         (**self.default_parsed.load()).clone()
     }
-
 }
 
 /// HTTP-01 challenge token store for ACME validation
@@ -375,7 +371,7 @@ impl CertificateManager {
                         );
                         return Ok(None);
                     }
-                    
+
                     if !cert_pair.needs_renewal(self.config.renew_before_days) {
                         info!(
                             "Loaded existing certificate, expires at: {}",
@@ -459,19 +455,14 @@ impl CertificateManager {
     ) -> Result<CertKeyPair, Box<dyn std::error::Error + Send + Sync>> {
         // Clone domains early to avoid borrow conflicts
         let domains = self.config.domains.clone();
-        
-        info!(
-            "Requesting certificate for domains: {:?}",
-            domains
-        );
+
+        info!("Requesting certificate for domains: {:?}", domains);
 
         let account = self.get_or_create_account().await?;
 
         // Create identifiers for all domains
-        let identifiers: Vec<Identifier> = domains
-            .iter()
-            .map(|d| Identifier::Dns(d.clone()))
-            .collect();
+        let identifiers: Vec<Identifier> =
+            domains.iter().map(|d| Identifier::Dns(d.clone())).collect();
 
         // Create new order
         let mut order = account
@@ -500,7 +491,10 @@ impl CertificateManager {
                     let token = challenge.token.clone();
                     let key_auth = order.key_authorization(challenge).as_str().to_string();
 
-                    info!("Setting up HTTP-01 challenge for token: {} (domain: {:?})", token, auth.identifier);
+                    info!(
+                        "Setting up HTTP-01 challenge for token: {} (domain: {:?})",
+                        token, auth.identifier
+                    );
 
                     // Store challenge response
                     self.challenge_store.set(token.clone(), key_auth).await;
@@ -510,14 +504,15 @@ impl CertificateManager {
                     order.set_challenge_ready(&challenge.url).await?;
                 }
                 AuthorizationStatus::Valid => {
-                    info!("Authorization already valid for {:?} (skipping challenge)", auth.identifier);
+                    info!(
+                        "Authorization already valid for {:?} (skipping challenge)",
+                        auth.identifier
+                    );
                 }
                 _ => {
-                    return Err(format!(
-                        "Unexpected authorization status: {:?}",
-                        auth.status
-                    )
-                    .into());
+                    return Err(
+                        format!("Unexpected authorization status: {:?}", auth.status).into(),
+                    );
                 }
             }
         }
@@ -527,7 +522,7 @@ impl CertificateManager {
         loop {
             sleep(std::time::Duration::from_secs(2)).await;
             order.refresh().await?;
-            
+
             let state = order.state();
             match state.status {
                 OrderStatus::Ready | OrderStatus::Valid => {
@@ -537,14 +532,16 @@ impl CertificateManager {
                 OrderStatus::Invalid => {
                     // Log detailed error information
                     for auth in order.authorizations().await? {
-                         if auth.status == AuthorizationStatus::Invalid {
-                             for challenge in auth.challenges {
-                                 if let Some(error) = challenge.error {
-                                     error!("Authorization failed for domain {:?}: {:?} - {:?}", 
-                                         auth.identifier, error.r#type, error.detail);
-                                 }
-                             }
-                         }
+                        if auth.status == AuthorizationStatus::Invalid {
+                            for challenge in auth.challenges {
+                                if let Some(error) = challenge.error {
+                                    error!(
+                                        "Authorization failed for domain {:?}: {:?} - {:?}",
+                                        auth.identifier, error.r#type, error.detail
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Clean up all challenge tokens
@@ -555,7 +552,8 @@ impl CertificateManager {
                 }
                 OrderStatus::Pending | OrderStatus::Processing => {
                     attempts += 1;
-                    if attempts > 60 {  // Increased timeout for multiple domains
+                    if attempts > 60 {
+                        // Increased timeout for multiple domains
                         // Clean up all challenge tokens
                         for token in &challenge_tokens {
                             self.challenge_store.remove(token).await;
@@ -641,7 +639,10 @@ impl AcmeBackgroundService {
                     Err(e) => error!("ACME certificate update failed for {:?}: {}", domains, e),
                 }
             } else {
-                debug!("ACME renewal check: certificate still valid for {:?}", domains);
+                debug!(
+                    "ACME renewal check: certificate still valid for {:?}",
+                    domains
+                );
             }
         }
     }

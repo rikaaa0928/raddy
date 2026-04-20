@@ -107,6 +107,9 @@ pub struct RouteConfig {
     /// Custom headers to add/override on the request
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// Headers to remove from the upstream response
+    #[serde(default)]
+    pub hide_headers: Vec<String>,
     /// Force HTTPS redirect for this route (overrides global setting)
     pub force_https_redirect: Option<bool>,
     /// Path rewriting configuration
@@ -114,6 +117,11 @@ pub struct RouteConfig {
     /// Compiled regex for path rewriting (internal use)
     #[serde(skip)]
     pub rewrite_regex: Option<regex::Regex>,
+    /// Query rewriting configuration
+    pub rewrite_query: Option<RewriteConfig>,
+    /// Compiled regex for query rewriting (internal use)
+    #[serde(skip)]
+    pub rewrite_query_regex: Option<regex::Regex>,
 }
 
 /// Path rewriting configuration
@@ -213,6 +221,15 @@ impl Config {
                 })?;
                 route.rewrite_regex = Some(regex);
             }
+            if let Some(rewrite) = &route.rewrite_query {
+                let regex = regex::Regex::new(&rewrite.pattern).map_err(|e| {
+                    ConfigError::ValidationError(format!(
+                        "Invalid rewrite_query regex in route {}: {}",
+                        i, e
+                    ))
+                })?;
+                route.rewrite_query_regex = Some(regex);
+            }
         }
 
         config.validate()?;
@@ -259,13 +276,11 @@ impl Config {
         // First, try to find an exact match with both host and path_prefix
         for route in &self.routes {
             let host_matches = match &route.hosts {
-                Some(route_hosts) => {
-                    route_hosts.iter().any(|route_host| {
-                        hosts.iter().any(|req_host| {
-                             req_host == &route_host || req_host.starts_with(&format!("{}:", route_host))
-                        })
+                Some(route_hosts) => route_hosts.iter().any(|route_host| {
+                    hosts.iter().any(|req_host| {
+                        req_host == &route_host || req_host.starts_with(&format!("{}:", route_host))
                     })
-                }
+                }),
                 None => true,
             };
 
@@ -364,13 +379,19 @@ upstream:
         let route1 = RouteConfig {
             hosts: Some(vec!["example.com".to_string(), "alias.com".to_string()]),
             path_prefix: None,
-            upstream: UpstreamConfig { url: "u1".to_string(), protocol: Protocol::Http },
+            upstream: UpstreamConfig {
+                url: "u1".to_string(),
+                protocol: Protocol::Http,
+            },
             headers: Default::default(),
+            hide_headers: Default::default(),
             force_https_redirect: None,
             rewrite: None,
             rewrite_regex: None,
+            rewrite_query: None,
+            rewrite_query_regex: None,
         };
-        
+
         let mut routes = Vec::new();
         routes.push(route1);
 
@@ -407,8 +428,10 @@ source:
 "#;
         let cert_config: TlsCertConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cert_config.domains.len(), 2);
-        assert!(cert_config.domains.contains(&"test.example.com".to_string()));
-        
+        assert!(cert_config
+            .domains
+            .contains(&"test.example.com".to_string()));
+
         match &cert_config.source {
             CertSource::Acme(acme) => {
                 assert_eq!(acme.email, "admin@example.com");
@@ -431,7 +454,7 @@ source:
         let cert_config: TlsCertConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cert_config.domains.len(), 1);
         assert_eq!(cert_config.domains[0], "static.example.com");
-        
+
         match &cert_config.source {
             CertSource::File(file) => {
                 assert_eq!(file.cert_path, "/path/to/cert.pem");
@@ -458,11 +481,10 @@ source:
 "#;
         let tls_certs: Vec<TlsCertConfig> = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(tls_certs.len(), 2);
-        
+
         // First cert should be ACME
         assert!(matches!(&tls_certs[0].source, CertSource::Acme(_)));
         // Second cert should be File
         assert!(matches!(&tls_certs[1].source, CertSource::File(_)));
     }
-
 }
