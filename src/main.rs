@@ -46,7 +46,7 @@ fn main() {
 
     if !is_in_startup_cwd {
         if let Ok(home) = std::env::var("HOME") {
-            let target_dir = std::path::Path::new(&home).join(".config/raddy");
+            let target_dir = std::path::Path::new(&home).join(".raddy");
             if !target_dir.exists() {
                 if let Err(e) = std::fs::create_dir_all(&target_dir) {
                     warn!("Failed to create working directory {:?}: {}", target_dir, e);
