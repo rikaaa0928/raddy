@@ -8,6 +8,7 @@ pub struct Config {
     /// Listen configuration
     pub listen: ListenConfig,
     /// Route configurations
+    #[serde(deserialize_with = "deserialize_routes")]
     pub routes: Vec<RouteConfig>,
 }
 
@@ -87,6 +88,47 @@ pub struct FileCertSource {
     pub cert_path: String,
     /// Path to private key file
     pub key_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRouteConfig {
+    WithPaths {
+        #[serde(
+            default,
+            alias = "host",
+            deserialize_with = "deserialize_string_or_vec"
+        )]
+        hosts: Option<Vec<String>>,
+        paths: Vec<RouteConfig>,
+    },
+    Single(RouteConfig),
+}
+
+fn deserialize_routes<'de, D>(deserializer: D) -> Result<Vec<RouteConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw_routes: Vec<RawRouteConfig> = Vec::deserialize(deserializer)?;
+    let mut routes = Vec::new();
+
+    for raw in raw_routes {
+        match raw {
+            RawRouteConfig::WithPaths { hosts, paths } => {
+                for mut path in paths {
+                    if path.hosts.is_none() {
+                        path.hosts = hosts.clone();
+                    }
+                    routes.push(path);
+                }
+            }
+            RawRouteConfig::Single(route) => {
+                routes.push(route);
+            }
+        }
+    }
+
+    Ok(routes)
 }
 
 /// Route configuration for matching requests
@@ -486,5 +528,47 @@ source:
         assert!(matches!(&tls_certs[0].source, CertSource::Acme(_)));
         // Second cert should be File
         assert!(matches!(&tls_certs[1].source, CertSource::File(_)));
+    }
+
+    #[test]
+    fn test_deserialize_routes_with_paths() {
+        let yaml = r#"
+listen:
+  address: "0.0.0.0"
+  port: 80
+routes:
+  - hosts: ["example.com"]
+    paths:
+      - path_prefix: "/api"
+        upstream:
+          url: "127.0.0.1:8080"
+          protocol: http
+      - path_prefix: "/static"
+        upstream:
+          url: "127.0.0.1:8081"
+          protocol: http
+  - host: "test.com"
+    path_prefix: "/v1"
+    upstream:
+      url: "127.0.0.1:8082"
+      protocol: http
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.routes.len(), 3);
+
+        let r1 = &config.routes[0];
+        assert_eq!(r1.hosts, Some(vec!["example.com".to_string()]));
+        assert_eq!(r1.path_prefix, Some("/api".to_string()));
+        assert_eq!(r1.upstream.url, "127.0.0.1:8080");
+
+        let r2 = &config.routes[1];
+        assert_eq!(r2.hosts, Some(vec!["example.com".to_string()]));
+        assert_eq!(r2.path_prefix, Some("/static".to_string()));
+        assert_eq!(r2.upstream.url, "127.0.0.1:8081");
+
+        let r3 = &config.routes[2];
+        assert_eq!(r3.hosts, Some(vec!["test.com".to_string()]));
+        assert_eq!(r3.path_prefix, Some("/v1".to_string()));
+        assert_eq!(r3.upstream.url, "127.0.0.1:8082");
     }
 }
