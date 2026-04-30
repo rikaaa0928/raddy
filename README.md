@@ -12,6 +12,7 @@ Raddy is a high-performance, lightweight reverse proxy built on [Cloudflare Ping
 - **TLS Hot-Reload**: Certificates are automatically reloaded after renewal without server restart.
 - **Per-Domain TLS**: Flexible per-domain certificate configuration with SNI-based certificate selection.
 - **Multi-Host Routing**: Route configuration supports matching multiple hosts for the same upstream.
+- **Multiple Paths per Host**: Group several path rules under the same host list to keep configuration compact.
 - **Flexible Routing**: Route requests based on hostnames and path prefixes.
 - **Custom Headers**: Easy configuration for adding or overriding request headers, including `$host` variable expansion.
 - **High Performance**: Uses MiMalloc allocator for optimal memory performance.
@@ -105,6 +106,34 @@ routes:
       url: "127.0.0.1:8080"
       protocol: ws
 ```
+
+### Multiple Paths per Host
+
+When several routes share the same host or host list, you can group them with `paths`. Each item under `paths` is expanded into a normal route.
+
+```yaml
+routes:
+  - hosts:
+      - "example.com"
+      - "www.example.com"
+    paths:
+      - path_prefix: "/api/"
+        upstream:
+          url: "127.0.0.1:3000"
+          protocol: http
+
+      - path_prefix: "/grpc.Service/"
+        upstream:
+          url: "127.0.0.1:50051"
+          protocol: grpc
+
+      # Default route for the same hosts
+      - upstream:
+          url: "127.0.0.1:8080"
+          protocol: http
+```
+
+Only `host`/`hosts` is inherited from the parent route group. Other route settings such as `headers`, `hide_headers`, `rewrite`, `rewrite_query`, and `force_https_redirect` must be configured on each `paths` item that needs them.
 
 ### Path Rewriting Logic
 

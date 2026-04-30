@@ -10,6 +10,7 @@ Raddy 是一个基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora
 - **TLS 热更新**: 证书续期后自动重新加载，无需重启服务器。
 - **域名级 TLS 配置**: 灵活的按域名证书配置，支持基于 SNI 的证书选择。
 - **多主机路由**: 路由配置支持为同一上游匹配多个主机。
+- **单主机多路径**: 可以把同一组 Host 下的多个路径规则合并到一个配置块中。
 - **灵活路由**: 支持基于域名 (Host) 和路径前缀 (Path prefix) 的路由规则。
 - **自定义 Header**: 轻松配置添加或覆盖请求头。
 - **高性能**: 使用 MiMalloc 内存分配器获得最佳性能。
@@ -103,6 +104,34 @@ routes:
       url: "127.0.0.1:8080"
       protocol: ws
 ```
+
+### 单主机多路径配置
+
+当多个路由共享同一个 `host` 或 `hosts` 列表时，可以使用 `paths` 把它们合并到同一个配置块里。`paths` 下的每一项都会展开成一条普通路由。
+
+```yaml
+routes:
+  - hosts:
+      - "example.com"
+      - "www.example.com"
+    paths:
+      - path_prefix: "/api/"
+        upstream:
+          url: "127.0.0.1:3000"
+          protocol: http
+
+      - path_prefix: "/grpc.Service/"
+        upstream:
+          url: "127.0.0.1:50051"
+          protocol: grpc
+
+      # 同一组 hosts 的默认路由
+      - upstream:
+          url: "127.0.0.1:8080"
+          protocol: http
+```
+
+父级配置只会向子项继承 `host`/`hosts`。其他路由设置，例如 `headers`、`hide_headers`、`rewrite`、`rewrite_query` 和 `force_https_redirect`，需要写在对应的 `paths` 子项里。
 
 ### 路径重写逻辑 (Path Rewriting Logic)
 
