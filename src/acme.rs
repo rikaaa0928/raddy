@@ -122,7 +122,7 @@ impl CertKeyPair {
     }
 }
 
-/// Pre-parsed OpenSSL certificate objects for efficient TLS handshakes.
+/// Pre-parsed TLS certificate objects for efficient handshakes.
 /// Avoids re-parsing PEM text on every TLS connection.
 pub struct ParsedCert {
     pub leaf_cert: X509,
