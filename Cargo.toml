@@ -1,34 +1,37 @@
 [package]
 name = "raddy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 
 [features]
-default = []
-vendored = ["openssl"]
+default = ["openssl"]
+# TLS backend features are mutually exclusive; use --no-default-features for boringssl builds.
+openssl = ["pingora/openssl"]
+boringssl = ["pingora/boringssl"]
+vendored = ["openssl", "dep:openssl", "openssl/vendored"]
 
 [dependencies]
 async-trait = "0.1.89"
-env_logger = "0.11.8"
-http = "1.4.0"
-log = "0.4.29"
-mimalloc = { version = "0.1", default-features = false }
-pingora = { version = "0.8.0", features = ["proxy", "openssl"] }
-openssl = { version = "0.10", optional = true, features = ["vendored"] }
+env_logger = "0.11.11"
+http = "1.4.2"
+log = "0.4.33"
+mimalloc = { version = "0.1.52", default-features = false }
+pingora = { version = "0.8.1", default-features = false, features = ["proxy"] }
+openssl = { version = "0.10.81", optional = true, features = ["vendored"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
-tokio = { version = "1.49.0", features = ["full"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "sync", "time"] }
 url = "2.5.8"
-regex = "1.10.6"
+regex = "1.12.4"
 
 
 # ACME certificate management
-instant-acme = "0.7"
-arc-swap = "1.7"
-rcgen = { version = "0.13", features = ["pem"] }
-x509-parser = "0.16"
-pem = "3.0"
-chrono = { version = "0.4", features = ["serde"] }
-serde_json = "1.0"
-time = "0.3"
+instant-acme = "0.8.5"
+arc-swap = "1.9.2"
+rcgen = { version = "0.14.8", features = ["pem"] }
+x509-parser = "0.18.1"
+pem = "3.0.6"
+chrono = { version = "0.4.45", features = ["serde"] }
+serde_json = "1.0.150"
+time = "0.3.51"

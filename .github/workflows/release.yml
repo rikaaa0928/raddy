@@ -10,37 +10,72 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.tls_backend }} ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 (Musl)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
-            archive_name: raddy-linux-x86_64.tar.gz
-          # Linux aarch64 (Musl)
+            tls_backend: openssl
+            features: vendored
+            archive_name: raddy-openssl-linux-x86_64.tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+            tls_backend: boringssl
+            features: boringssl
+            archive_name: raddy-boringssl-linux-x86_64.tar.gz
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_zigbuild: true
-            archive_name: raddy-linux-aarch64.tar.gz
-          # macOS x86_64
+            tls_backend: openssl
+            features: vendored
+            archive_name: raddy-openssl-linux-aarch64.tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+            tls_backend: boringssl
+            features: boringssl
+            archive_name: raddy-boringssl-linux-aarch64.tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest # Apple Silicon (Cross-compile to x86_64)
             use_zigbuild: false
-            archive_name: raddy-darwin-x86_64.tar.gz
-          # macOS aarch64
+            tls_backend: openssl
+            features: openssl
+            archive_name: raddy-openssl-darwin-x86_64.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest # Apple Silicon (Cross-compile to x86_64)
+            use_zigbuild: false
+            tls_backend: boringssl
+            features: boringssl
+            archive_name: raddy-boringssl-darwin-x86_64.tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest # Apple Silicon
             use_zigbuild: false
-            archive_name: raddy-darwin-aarch64.tar.gz
-          # Windows x86_64
+            tls_backend: openssl
+            features: openssl
+            archive_name: raddy-openssl-darwin-aarch64.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest # Apple Silicon
+            use_zigbuild: false
+            tls_backend: boringssl
+            features: boringssl
+            archive_name: raddy-boringssl-darwin-aarch64.tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             use_zigbuild: false
-            archive_name: raddy-windows-x86_64.zip
+            tls_backend: openssl
+            features: openssl
+            archive_name: raddy-openssl-windows-x86_64.zip
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_zigbuild: false
+            tls_backend: boringssl
+            features: boringssl
+            archive_name: raddy-boringssl-windows-x86_64.zip
 
     steps:
       - name: Checkout code
@@ -61,14 +96,19 @@ jobs:
         if: matrix.use_zigbuild
         run: cargo install cargo-zigbuild
 
-      - name: Install OpenSSL dependencies (Linux)
+      - name: Install TLS build dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config perl
+          sudo apt-get install -y clang cmake libclang-dev libssl-dev ninja-build perl pkg-config
+
+      - name: Install BoringSSL build dependencies (macOS)
+        if: matrix.os == 'macos-latest' && matrix.tls_backend == 'boringssl'
+        run: |
+          brew install cmake ninja
 
       - name: Install OpenSSL (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && matrix.tls_backend == 'openssl'
         shell: pwsh
         run: |
           vcpkg install openssl:x64-windows-static
@@ -79,18 +119,21 @@ jobs:
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
           echo "OPENSSL_NO_VENDOR=1" >> $env:GITHUB_ENV
 
+      - name: Install BoringSSL build dependencies (Windows)
+        if: matrix.os == 'windows-latest' && matrix.tls_backend == 'boringssl'
+        shell: pwsh
+        run: |
+          choco install cmake llvm ninja strawberryperl --no-progress
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
       - name: Build
         shell: bash
         run: |
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
-            # For musl cross-compilation, use vendored OpenSSL
-            OPENSSL_STATIC=1 cargo zigbuild --release --target ${{ matrix.target }} --features vendored
-          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
-            # Windows uses vcpkg OpenSSL - env vars set in previous step
-            cargo build --release --target ${{ matrix.target }}
+            cargo zigbuild --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
           else
-            # macOS and other platforms
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
           fi
 
       - name: Package (Unix)
@@ -127,11 +170,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            raddy-linux-x86_64.tar.gz/raddy-linux-x86_64.tar.gz
-            raddy-linux-aarch64.tar.gz/raddy-linux-aarch64.tar.gz
-            raddy-darwin-x86_64.tar.gz/raddy-darwin-x86_64.tar.gz
-            raddy-darwin-aarch64.tar.gz/raddy-darwin-aarch64.tar.gz
-            raddy-windows-x86_64.zip/raddy-windows-x86_64.zip
+            raddy-*/*
           generate_release_notes: true
           draft: false
           prerelease: false

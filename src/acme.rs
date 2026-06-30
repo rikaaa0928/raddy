@@ -416,7 +416,7 @@ impl CertificateManager {
         if Path::new(&account_path).exists() {
             let account_json = std::fs::read_to_string(&account_path)?;
             let credentials: AccountCredentials = serde_json::from_str(&account_json)?;
-            let account = Account::from_credentials(credentials).await?;
+            let account = Account::builder()?.from_credentials(credentials).await?;
             self.account = Some(account);
             info!("Loaded existing ACME account");
         } else {
@@ -427,16 +427,17 @@ impl CertificateManager {
                 &self.config.directory_url
             };
 
-            let (account, credentials) = Account::create(
-                &NewAccount {
-                    contact: &[&format!("mailto:{}", self.config.email)],
-                    terms_of_service_agreed: true,
-                    only_return_existing: false,
-                },
-                directory_url,
-                None,
-            )
-            .await?;
+            let (account, credentials) = Account::builder()?
+                .create(
+                    &NewAccount {
+                        contact: &[&format!("mailto:{}", self.config.email)],
+                        terms_of_service_agreed: true,
+                        only_return_existing: false,
+                    },
+                    directory_url.to_owned(),
+                    None,
+                )
+                .await?;
 
             // Save account credentials
             let credentials_json = serde_json::to_string_pretty(&credentials)?;
@@ -466,34 +467,32 @@ impl CertificateManager {
 
         // Create new order
         let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &identifiers,
-            })
+            .new_order(&NewOrder::new(identifiers.as_slice()))
             .await?;
 
         // Get authorizations and complete challenges
-        let authorizations = order.authorizations().await?;
+        let mut authorizations = order.authorizations();
 
         // Collect all challenges to set up
         let mut challenge_tokens: Vec<String> = Vec::new();
 
         // First pass: set up all challenges
-        for auth in &authorizations {
+        while let Some(result) = authorizations.next().await {
+            let mut auth = result?;
             match auth.status {
                 AuthorizationStatus::Pending => {
                     // Find HTTP-01 challenge
-                    let challenge = auth
-                        .challenges
-                        .iter()
-                        .find(|c| c.r#type == ChallengeType::Http01)
+                    let mut challenge = auth
+                        .challenge(ChallengeType::Http01)
                         .ok_or("No HTTP-01 challenge found")?;
 
                     let token = challenge.token.clone();
-                    let key_auth = order.key_authorization(challenge).as_str().to_string();
+                    let key_auth = challenge.key_authorization().as_str().to_string();
 
                     info!(
                         "Setting up HTTP-01 challenge for token: {} (domain: {:?})",
-                        token, auth.identifier
+                        token,
+                        challenge.identifier()
                     );
 
                     // Store challenge response
@@ -501,12 +500,12 @@ impl CertificateManager {
                     challenge_tokens.push(token);
 
                     // Notify ACME server that challenge is ready
-                    order.set_challenge_ready(&challenge.url).await?;
+                    challenge.set_ready().await?;
                 }
                 AuthorizationStatus::Valid => {
                     info!(
                         "Authorization already valid for {:?} (skipping challenge)",
-                        auth.identifier
+                        auth.identifier()
                     );
                 }
                 _ => {
@@ -521,23 +520,26 @@ impl CertificateManager {
         let mut attempts = 0;
         loop {
             sleep(std::time::Duration::from_secs(2)).await;
-            order.refresh().await?;
+            let status = order.refresh().await?.status;
 
-            let state = order.state();
-            match state.status {
+            match status {
                 OrderStatus::Ready | OrderStatus::Valid => {
                     info!("All authorizations validated, order is ready");
                     break;
                 }
                 OrderStatus::Invalid => {
                     // Log detailed error information
-                    for auth in order.authorizations().await? {
+                    let mut authorizations = order.authorizations();
+                    while let Some(result) = authorizations.next().await {
+                        let auth = result?;
                         if auth.status == AuthorizationStatus::Invalid {
-                            for challenge in auth.challenges {
-                                if let Some(error) = challenge.error {
+                            for challenge in &auth.challenges {
+                                if let Some(error) = &challenge.error {
                                     error!(
                                         "Authorization failed for domain {:?}: {:?} - {:?}",
-                                        auth.identifier, error.r#type, error.detail
+                                        auth.identifier(),
+                                        error.r#type,
+                                        error.detail
                                     );
                                 }
                             }
@@ -569,14 +571,8 @@ impl CertificateManager {
             self.challenge_store.remove(token).await;
         }
 
-        // Generate CSR and finalize order
-        let mut params = rcgen::CertificateParams::new(self.config.domains.clone())?;
-        params.distinguished_name = rcgen::DistinguishedName::new();
-
-        let private_key = rcgen::KeyPair::generate()?;
-        let csr = params.serialize_request(&private_key)?;
-
-        order.finalize(csr.der()).await?;
+        // Generate CSR and finalize order.
+        let key_pem = order.finalize().await?;
 
         // Wait for certificate
         let mut attempts = 0;
@@ -593,7 +589,6 @@ impl CertificateManager {
             }
         };
 
-        let key_pem = private_key.serialize_pem();
         let cert_pair = CertKeyPair {
             cert_pem: cert_chain,
             key_pem,
