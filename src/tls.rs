@@ -38,6 +38,7 @@ impl DynamicCert {
     /// Create a new DynamicCert with fallback certificate files
     ///
     /// The fallback certificates are used if the CertStore is empty.
+    #[allow(dead_code)]
     pub fn with_fallback(
         cert_store: Arc<CertStore>,
         cert_path: &str,

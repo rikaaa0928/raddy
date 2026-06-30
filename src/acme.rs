@@ -64,7 +64,7 @@ impl CertKeyPair {
         let (_, cert) = x509_parser::parse_x509_certificate(pem_data.contents())?;
         let not_after = cert.validity().not_after.to_datetime();
         // Use DateTime::from_timestamp instead of deprecated from_timestamp_opt
-        Ok(DateTime::from_timestamp(not_after.unix_timestamp(), 0).unwrap_or_else(|| Utc::now()))
+        Ok(DateTime::from_timestamp(not_after.unix_timestamp(), 0).unwrap_or_else(Utc::now))
     }
 
     /// Save certificate and key to files
@@ -403,51 +403,52 @@ impl CertificateManager {
     async fn get_or_create_account(
         &mut self,
     ) -> Result<&Account, Box<dyn std::error::Error + Send + Sync>> {
-        if self.account.is_some() {
-            return Ok(self.account.as_ref().unwrap());
-        }
+        if self.account.is_none() {
+            let account_path = format!("{}/account.json", self.config.cert_dir);
 
-        let account_path = format!("{}/account.json", self.config.cert_dir);
+            // Ensure cert directory exists
+            std::fs::create_dir_all(&self.config.cert_dir)?;
 
-        // Ensure cert directory exists
-        std::fs::create_dir_all(&self.config.cert_dir)?;
-
-        // Try to load existing account
-        if Path::new(&account_path).exists() {
-            let account_json = std::fs::read_to_string(&account_path)?;
-            let credentials: AccountCredentials = serde_json::from_str(&account_json)?;
-            let account = Account::builder()?.from_credentials(credentials).await?;
-            self.account = Some(account);
-            info!("Loaded existing ACME account");
-        } else {
-            // Create new account
-            let directory_url = if self.config.staging {
-                LetsEncrypt::Staging.url()
+            // Try to load existing account
+            if Path::new(&account_path).exists() {
+                let account_json = std::fs::read_to_string(&account_path)?;
+                let credentials: AccountCredentials = serde_json::from_str(&account_json)?;
+                let account = Account::builder()?.from_credentials(credentials).await?;
+                self.account = Some(account);
+                info!("Loaded existing ACME account");
             } else {
-                &self.config.directory_url
-            };
+                // Create new account
+                let directory_url = if self.config.staging {
+                    LetsEncrypt::Staging.url()
+                } else {
+                    &self.config.directory_url
+                };
 
-            let (account, credentials) = Account::builder()?
-                .create(
-                    &NewAccount {
-                        contact: &[&format!("mailto:{}", self.config.email)],
-                        terms_of_service_agreed: true,
-                        only_return_existing: false,
-                    },
-                    directory_url.to_owned(),
-                    None,
-                )
-                .await?;
+                let (account, credentials) = Account::builder()?
+                    .create(
+                        &NewAccount {
+                            contact: &[&format!("mailto:{}", self.config.email)],
+                            terms_of_service_agreed: true,
+                            only_return_existing: false,
+                        },
+                        directory_url.to_owned(),
+                        None,
+                    )
+                    .await?;
 
-            // Save account credentials
-            let credentials_json = serde_json::to_string_pretty(&credentials)?;
-            std::fs::write(&account_path, credentials_json)?;
+                // Save account credentials
+                let credentials_json = serde_json::to_string_pretty(&credentials)?;
+                std::fs::write(&account_path, credentials_json)?;
 
-            self.account = Some(account);
-            info!("Created new ACME account");
+                self.account = Some(account);
+                info!("Created new ACME account");
+            }
         }
 
-        Ok(self.account.as_ref().unwrap())
+        match &self.account {
+            Some(account) => Ok(account),
+            None => Err("ACME account was not initialized".into()),
+        }
     }
 
     /// Request a new certificate from ACME

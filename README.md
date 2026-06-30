@@ -7,7 +7,7 @@ Raddy is a high-performance, lightweight reverse proxy built on [Cloudflare Ping
 ## Features
 
 - **Built on Pingora**: Leverages the high-performance, memory-safe architecture of Cloudflare's proxy framework.
-- **Protocol Support**: Full support for HTTP/1.1, HTTP/2, gRPC (h2c/TLS), and WebSockets (WS/WSS).
+- **Protocol Support**: Full support for HTTP/1.1, HTTP/2, HTTP/3, gRPC (h2c/TLS), and WebSockets (WS/WSS).
 - **Auto SSL (ACME)**: Built-in integration with Let's Encrypt for automatic certificate issuance and renewal.
 - **TLS Hot-Reload**: Certificates are automatically reloaded after renewal without server restart.
 - **Per-Domain TLS**: Flexible per-domain certificate configuration with SNI-based certificate selection.
@@ -58,6 +58,9 @@ listen:
   address: "0.0.0.0"
   http_port: 80
   https_port: 443
+  # HTTP/3 is enabled by default and listens on the HTTPS port over UDP.
+  # Set this to false to avoid starting the UDP listener.
+  http3: true
   
   # Per-domain TLS configuration
   tls:
@@ -90,6 +93,8 @@ routes:
       url: "127.0.0.1:3000"
       protocol: http
     force_https_redirect: true
+    # Route-level HTTP/3 is enabled by default. Set to false to reject H3 for this route.
+    http3: true
     headers:
       Host: "$host"
       X-Custom-Header: "Raddy-Proxy"
@@ -133,7 +138,42 @@ routes:
           protocol: http
 ```
 
-Only `host`/`hosts` is inherited from the parent route group. Other route settings such as `headers`, `hide_headers`, `rewrite`, `rewrite_query`, and `force_https_redirect` must be configured on each `paths` item that needs them.
+Only `host`/`hosts` and `http3` are inherited from the parent route group. Other route settings such as `headers`, `hide_headers`, `rewrite`, `rewrite_query`, and `force_https_redirect` must be configured on each `paths` item that needs them.
+
+### HTTP/3
+
+HTTP/3 is enabled by default when HTTPS and TLS are configured. Raddy listens on the same port as HTTPS, using TCP for HTTP/1.1 and HTTP/2 and UDP for HTTP/3. To disable the UDP listener globally:
+
+```yaml
+listen:
+  address: "0.0.0.0"
+  https_port: 443
+  http3: false
+```
+
+You can disable HTTP/3 for a single route or a grouped set of paths:
+
+```yaml
+routes:
+  - host: "example.com"
+    http3: false
+    upstream:
+      url: "http://127.0.0.1:3000"
+      protocol: http
+
+  - hosts: ["api.example.com"]
+    http3: false
+    paths:
+      - path_prefix: "/internal/"
+        upstream:
+          url: "http://127.0.0.1:3001"
+          protocol: http
+      - path_prefix: "/public/"
+        http3: true
+        upstream:
+          url: "http://127.0.0.1:3002"
+          protocol: http
+```
 
 ### Path Rewriting Logic
 

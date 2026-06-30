@@ -135,6 +135,15 @@ impl ProxyService {
         let host = host.unwrap_or("");
         template.replace("$http_host", host).replace("$host", host)
     }
+
+    fn http3_alt_svc_value(&self, route: &RouteConfig) -> Option<String> {
+        if !self.is_tls || !self.config.listen.http3 || !route.http3_enabled() {
+            return None;
+        }
+
+        let https_port = self.config.listen.https_port?;
+        Some(format!("h3=\":{}\"; ma=86400", https_port))
+    }
 }
 
 /// Context passed between request phases
@@ -550,6 +559,10 @@ impl ProxyHttp for ProxyService {
                 upstream_response.remove_header(header_name);
                 debug!("Removed response header: {}", header_name);
             }
+
+            if let Some(alt_svc) = self.http3_alt_svc_value(route) {
+                upstream_response.insert_header("Alt-Svc", alt_svc)?;
+            }
         }
         Ok(())
     }
@@ -600,6 +613,7 @@ mod tests {
             headers: Default::default(),
             hide_headers: Default::default(),
             force_https_redirect: None,
+            http3: None,
             rewrite: Some(RewriteConfig {
                 pattern: pattern.to_string(),
                 to: "/v1/$1".to_string(),

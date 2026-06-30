@@ -5,7 +5,7 @@ Raddy 是一个基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora
 ## 功能特性
 
 - **基于 Pingora**: 利用 Cloudflare 代理框架的高性能和内存安全架构。
-- **多协议支持**: 全面支持 HTTP/1.1、HTTP/2、gRPC (h2c/TLS) 以及 WebSocket (WS/WSS)。
+- **多协议支持**: 全面支持 HTTP/1.1、HTTP/2、HTTP/3、gRPC (h2c/TLS) 以及 WebSocket (WS/WSS)。
 - **自动 SSL (ACME)**: 内置集成 Let's Encrypt，支持自动申请和续期 SSL 证书。
 - **TLS 热更新**: 证书续期后自动重新加载，无需重启服务器。
 - **域名级 TLS 配置**: 灵活的按域名证书配置，支持基于 SNI 的证书选择。
@@ -56,6 +56,9 @@ listen:
   address: "0.0.0.0"
   http_port: 80
   https_port: 443
+  # HTTP/3 默认开启，通过 HTTPS 端口的 UDP 监听。
+  # 设置为 false 后不会启动 UDP listener。
+  http3: true
   
   # 按域名配置 TLS
   tls:
@@ -88,6 +91,8 @@ routes:
       url: "127.0.0.1:3000"
       protocol: http
     force_https_redirect: true
+    # 路由级 HTTP/3 默认开启。设置为 false 后该路由拒绝 H3 请求。
+    http3: true
     headers:
       Host: "$host"
       X-Custom-Header: "Raddy-Proxy"
@@ -131,7 +136,42 @@ routes:
           protocol: http
 ```
 
-父级配置只会向子项继承 `host`/`hosts`。其他路由设置，例如 `headers`、`hide_headers`、`rewrite`、`rewrite_query` 和 `force_https_redirect`，需要写在对应的 `paths` 子项里。
+父级配置只会向子项继承 `host`/`hosts` 和 `http3`。其他路由设置，例如 `headers`、`hide_headers`、`rewrite`、`rewrite_query` 和 `force_https_redirect`，需要写在对应的 `paths` 子项里。
+
+### HTTP/3
+
+当 HTTPS 和 TLS 配置完整时，HTTP/3 默认开启。Raddy 会复用 HTTPS 端口：TCP 处理 HTTP/1.1 和 HTTP/2，UDP 处理 HTTP/3。全局关闭 HTTP/3 后不会启动 UDP listener：
+
+```yaml
+listen:
+  address: "0.0.0.0"
+  https_port: 443
+  http3: false
+```
+
+也可以针对单条路由或一组 `paths` 关闭 HTTP/3：
+
+```yaml
+routes:
+  - host: "example.com"
+    http3: false
+    upstream:
+      url: "http://127.0.0.1:3000"
+      protocol: http
+
+  - hosts: ["api.example.com"]
+    http3: false
+    paths:
+      - path_prefix: "/internal/"
+        upstream:
+          url: "http://127.0.0.1:3001"
+          protocol: http
+      - path_prefix: "/public/"
+        http3: true
+        upstream:
+          url: "http://127.0.0.1:3002"
+          protocol: http
+```
 
 ### 路径重写逻辑 (Path Rewriting Logic)
 
