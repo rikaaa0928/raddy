@@ -35,6 +35,10 @@ use tokio::io::ReadBuf;
 const MAX_MMSG: usize = 16;
 
 fn msghdr(iov: *mut libc::iovec) -> libc::msghdr {
+    // Temporary compatibility patch for cloudflare/quiche#2222:
+    // https://github.com/cloudflare/quiche/issues/2222
+    // Remove the vendor override when upstream datagram-socket carries this fix.
+    //
     // Some libc targets keep ABI padding fields private. Build from a zeroed
     // value and assign public fields instead of using struct literal syntax.
     let mut msg_hdr = unsafe { std::mem::zeroed::<libc::msghdr>() };

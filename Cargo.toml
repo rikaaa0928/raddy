@@ -33,4 +33,7 @@ serde_json = "1.0.150"
 time = "0.3.51"
 
 [patch.crates-io]
+# Temporary patch for cloudflare/quiche#2222:
+# https://github.com/cloudflare/quiche/issues/2222
+# Remove this vendor override once upstream datagram-socket builds with current libc on Linux musl.
 datagram-socket = { path = "vendor/datagram-socket" }

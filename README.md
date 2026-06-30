@@ -254,6 +254,14 @@ headers:
 | `ws`       | WebSocket                   |
 | `wss`      | WebSocket Secure            |
 
+## Maintainer Notes
+
+`datagram-socket` is temporarily vendored under `vendor/datagram-socket` because `datagram-socket 0.8.0` can fail to compile on Linux musl with current `libc` due to private `msghdr` padding fields. Track upstream issue cloudflare/quiche#2222:
+
+https://github.com/cloudflare/quiche/issues/2222
+
+Once the upstream fix is released through `tokio-quiche`, remove the `[patch.crates-io]` override from `Cargo.toml` and delete `vendor/datagram-socket`.
+
 ## License
 
 [MIT License](LICENSE)
