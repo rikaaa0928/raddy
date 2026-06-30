@@ -31,3 +31,6 @@ pem = "3.0.6"
 chrono = { version = "0.4.45", features = ["serde"] }
 serde_json = "1.0.150"
 time = "0.3.51"
+
+[patch.crates-io]
+datagram-socket = { path = "vendor/datagram-socket" }
