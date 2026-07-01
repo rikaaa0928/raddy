@@ -575,7 +575,7 @@ async fn relay_http_bodies(
             frame = recv.recv(), if !downstream_finished => {
                 downstream_finished = forward_request_frame(upstream, frame).await?;
             }
-            chunk = upstream.read_response_body() => {
+            chunk = read_response_body_cancel_safe(upstream) => {
                 match chunk {
                     Ok(Some(chunk)) => {
                         if !chunk.is_empty() {
@@ -586,7 +586,7 @@ async fn relay_http_bodies(
                         send_response_trailers_or_fin(send, upstream, route).await?;
                         return Ok(());
                     }
-                    Err(e) => return Err(Box::new(e)),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -603,6 +603,18 @@ async fn read_response_header_cancel_safe(upstream: &mut HttpSession) -> H3Resul
 
     upstream.read_response_header().await?;
     Ok(())
+}
+
+async fn read_response_body_cancel_safe(upstream: &mut HttpSession) -> H3Result<Option<Bytes>> {
+    if let HttpSession::H2(h2) = upstream {
+        return match poll_fn(|cx| h2.poll_read_response_body(cx)).await {
+            Some(Ok(chunk)) => Ok(Some(chunk)),
+            Some(Err(e)) => Err(Box::new(e) as Box<dyn Error + Send + Sync>),
+            None => Ok(None),
+        };
+    }
+
+    Ok(upstream.read_response_body().await?)
 }
 
 async fn forward_request_frame(
