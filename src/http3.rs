@@ -11,6 +11,7 @@ use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use pingora::upstreams::peer::HttpPeer;
 use std::error::Error;
+use std::future::poll_fn;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -548,7 +549,7 @@ async fn proxy_http_stream(
             frame = recv.recv(), if !downstream_finished => {
                 downstream_finished = forward_request_frame(upstream, frame).await?;
             }
-            response = upstream.read_response_header() => {
+            response = read_response_header_cancel_safe(upstream) => {
                 response?;
                 let response = upstream
                     .response_header()
@@ -590,6 +591,18 @@ async fn relay_http_bodies(
             }
         }
     }
+}
+
+async fn read_response_header_cancel_safe(upstream: &mut HttpSession) -> H3Result<()> {
+    if let HttpSession::H2(h2) = upstream {
+        poll_fn(|cx| h2.poll_read_response_header(cx))
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        return Ok(());
+    }
+
+    upstream.read_response_header().await?;
+    Ok(())
 }
 
 async fn forward_request_frame(
