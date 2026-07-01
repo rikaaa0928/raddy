@@ -140,7 +140,9 @@ routes:
 
 ### HTTP/3
 
-当 HTTPS 和 TLS 配置完整时，HTTP/3 默认开启。Raddy 会复用 HTTPS 端口：TCP 处理 HTTP/1.1 和 HTTP/2，UDP 处理 HTTP/3。全局关闭 HTTP/3 后不会启动 UDP listener：
+当 HTTPS 和 TLS 配置完整时，HTTP/3 默认开启。Raddy 会复用 HTTPS 端口：TCP 处理 HTTP/1.1 和 HTTP/2，UDP 处理 HTTP/3。
+
+HTTP/3 入栈可以代理到 HTTP/1.1/HTTPS、基于 HTTP/2 的 gRPC (`grpc`/`grpc_tls`) 以及 WebSocket 上游 (`ws`/`wss`)。WebSocket over HTTP/3 使用 extended CONNECT (`:protocol = websocket`)，Raddy 会将其转换为上游 HTTP/1.1 Upgrade 握手。全局关闭 HTTP/3 后不会启动 UDP listener：
 
 ```yaml
 listen:

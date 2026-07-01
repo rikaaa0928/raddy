@@ -142,7 +142,9 @@ Only `host`/`hosts` and `http3` are inherited from the parent route group. Other
 
 ### HTTP/3
 
-HTTP/3 is enabled by default when HTTPS and TLS are configured. Raddy listens on the same port as HTTPS, using TCP for HTTP/1.1 and HTTP/2 and UDP for HTTP/3. To disable the UDP listener globally:
+HTTP/3 is enabled by default when HTTPS and TLS are configured. Raddy listens on the same port as HTTPS, using TCP for HTTP/1.1 and HTTP/2 and UDP for HTTP/3.
+
+HTTP/3 ingress can proxy to HTTP/1.1/HTTPS, gRPC over HTTP/2 (`grpc`/`grpc_tls`), and WebSocket upstreams (`ws`/`wss`). WebSocket over HTTP/3 uses extended CONNECT (`:protocol = websocket`) and is translated to the upstream HTTP/1.1 Upgrade handshake. To disable the UDP listener globally:
 
 ```yaml
 listen:

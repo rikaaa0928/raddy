@@ -121,4 +121,4 @@ jobs:
             raddy-*/*
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, 'dev') || contains(github.ref_name, 'preview') || contains(github.ref_name, 'prev') }}
