@@ -802,45 +802,28 @@ impl tokio_quiche::quic::ConnectionHook for DynamicQuicCert {
     ) -> Option<SslContextBuilder> {
         let mut builder = SslContextBuilder::new(SslMethod::tls()).ok()?;
 
-        if let Some(default_cert) = self.cert_store.get_default_parsed() {
-            if let Err(e) = apply_cert_to_context(&mut builder, &default_cert) {
-                error!("Failed to set default QUIC certificate: {}", e);
-                return None;
-            }
-        } else {
-            warn!("HTTP/3 dynamic certificate store has no default certificate");
-        }
-
         let cert_store = self.cert_store.clone();
         builder.set_servername_callback(move |ssl, _alert| {
-            let cert = ssl
-                .servername(NameType::HOST_NAME)
-                .and_then(|domain| cert_store.get_parsed_for_domain_or_default(domain));
+            let Some(domain) = ssl.servername(NameType::HOST_NAME) else {
+                warn!("HTTP/3 TLS handshake rejected: missing SNI");
+                return Err(SniError::ALERT_FATAL);
+            };
 
-            if let Some(cert) = cert {
-                apply_cert_to_ssl(ssl, &cert).map_err(|e| {
-                    error!("Failed to set QUIC certificate from SNI: {}", e);
-                    SniError::ALERT_FATAL
-                })?;
-            }
+            let Some(cert) = cert_store.get_parsed_for_domain(domain) else {
+                warn!("HTTP/3 TLS handshake rejected: no certificate configured for SNI {domain}");
+                return Err(SniError::ALERT_FATAL);
+            };
+
+            apply_cert_to_ssl(ssl, &cert).map_err(|e| {
+                error!("Failed to set QUIC certificate from SNI: {}", e);
+                SniError::ALERT_FATAL
+            })?;
 
             Ok(())
         });
 
         Some(builder)
     }
-}
-
-fn apply_cert_to_context(
-    builder: &mut SslContextBuilder,
-    cert: &ParsedCert,
-) -> Result<(), boring::error::ErrorStack> {
-    builder.set_certificate(&cert.leaf_cert)?;
-    for chain_cert in &cert.chain_certs {
-        builder.add_extra_chain_cert(chain_cert.clone())?;
-    }
-    builder.set_private_key(&cert.private_key)?;
-    Ok(())
 }
 
 fn apply_cert_to_ssl(ssl: &mut SslRef, cert: &ParsedCert) -> Result<(), boring::error::ErrorStack> {
