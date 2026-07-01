@@ -159,27 +159,16 @@ impl ParsedCert {
 pub struct CertStore {
     /// Domain-indexed certificate storage (PEM data for persistence)
     certs: ArcSwap<HashMap<String, Arc<CertKeyPair>>>,
-    /// Default certificate for when no domain-specific cert is found
-    default_cert: ArcSwap<Option<Arc<CertKeyPair>>>,
     /// Cached pre-parsed certificates per domain
     parsed_certs: ArcSwap<HashMap<String, Arc<ParsedCert>>>,
-    /// Cached pre-parsed default certificate
-    default_parsed: ArcSwap<Option<Arc<ParsedCert>>>,
 }
 
 impl CertStore {
     pub fn new() -> Self {
         Self {
             certs: ArcSwap::from_pointee(HashMap::new()),
-            default_cert: ArcSwap::from_pointee(None),
             parsed_certs: ArcSwap::from_pointee(HashMap::new()),
-            default_parsed: ArcSwap::from_pointee(None),
         }
-    }
-
-    /// Load the default certificate (legacy API)
-    pub fn load(&self) -> arc_swap::Guard<Arc<Option<Arc<CertKeyPair>>>> {
-        self.default_cert.load()
     }
 
     /// Store a certificate for specific domains
@@ -213,14 +202,6 @@ impl CertStore {
             }
             self.parsed_certs.store(Arc::new(parsed_map));
         }
-
-        // Also set as default if no default exists
-        if self.default_cert.load().is_none() {
-            self.default_cert.store(Arc::new(Some(cert)));
-            if let Some(parsed) = parsed {
-                self.default_parsed.store(Arc::new(Some(parsed)));
-            }
-        }
     }
 
     /// Get certificate for a specific domain
@@ -229,19 +210,11 @@ impl CertStore {
         certs.get(domain).cloned()
     }
 
-    /// Get pre-parsed certificate for a domain, falling back to default.
+    /// Get pre-parsed certificate for a configured domain.
     /// This avoids PEM re-parsing on every TLS handshake.
-    pub fn get_parsed_for_domain_or_default(&self, domain: &str) -> Option<Arc<ParsedCert>> {
+    pub fn get_parsed_for_domain(&self, domain: &str) -> Option<Arc<ParsedCert>> {
         let parsed = self.parsed_certs.load();
-        if let Some(cert) = parsed.get(domain) {
-            return Some(cert.clone());
-        }
-        (**self.default_parsed.load()).clone()
-    }
-
-    /// Get pre-parsed default certificate
-    pub fn get_default_parsed(&self) -> Option<Arc<ParsedCert>> {
-        (**self.default_parsed.load()).clone()
+        parsed.get(domain).cloned()
     }
 }
 
@@ -344,7 +317,6 @@ impl CertificateManager {
             .domains
             .iter()
             .find_map(|domain| self.cert_store.get_for_domain(domain))
-            .or_else(|| (**self.cert_store.load()).clone())
     }
 
     pub fn needs_certificate(&self) -> bool {
@@ -668,5 +640,37 @@ impl BackgroundService for AcmeBackgroundService {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{CertificateParams, KeyPair};
+
+    fn test_cert(domains: &[&str]) -> CertKeyPair {
+        let mut params =
+            CertificateParams::new(domains.iter().map(|d| d.to_string()).collect::<Vec<_>>())
+                .expect("test certificate params");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        let key_pair = KeyPair::generate().expect("test key pair");
+        let cert = params.self_signed(&key_pair).expect("test certificate");
+
+        CertKeyPair {
+            cert_pem: cert.pem(),
+            key_pem: key_pair.serialize_pem(),
+            expires_at: Utc::now() + Duration::days(1),
+        }
+    }
+
+    #[test]
+    fn cert_store_does_not_fallback_to_an_unmatched_domain() {
+        let store = CertStore::new();
+        store.store_for_domains(&["a.example".to_string()], test_cert(&["a.example"]));
+
+        assert!(store.get_for_domain("a.example").is_some());
+        assert!(store.get_parsed_for_domain("a.example").is_some());
+        assert!(store.get_for_domain("b.example").is_none());
+        assert!(store.get_parsed_for_domain("b.example").is_none());
     }
 }
