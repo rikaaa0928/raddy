@@ -239,15 +239,7 @@ impl Http3ConnectionHandler {
             if is_websocket {
                 proxy_websocket_tunnel(send, &mut upstream, recv, read_fin, &route).await
             } else {
-                write_request_body(&mut upstream, recv, read_fin).await?;
-                upstream.read_response_header().await?;
-
-                let response = upstream
-                    .response_header()
-                    .ok_or("upstream response header missing")?
-                    .clone();
-                let send = send_response_headers(send, &response, &route).await?;
-                send_response_body(send, &mut upstream, &route).await
+                proxy_http_stream(send, &mut upstream, recv, read_fin, &route).await
             }
         }
         .await;
@@ -537,32 +529,91 @@ fn ensure_websocket_upgrade_headers(request: &mut RequestHeader) -> H3Result<()>
     Ok(())
 }
 
-async fn write_request_body(
+async fn proxy_http_stream(
+    send: OutboundFrameSender,
     upstream: &mut HttpSession,
     mut recv: tokio_quiche::http3::driver::InboundFrameStream,
     read_fin: bool,
+    route: &RouteConfig,
 ) -> H3Result<()> {
-    if read_fin {
+    let mut downstream_finished = read_fin;
+    if downstream_finished {
         upstream.finish_request_body().await?;
-        return Ok(());
     }
 
-    while let Some(frame) = recv.recv().await {
-        match frame {
-            InboundFrame::Body(body, fin) => {
-                if !body.is_empty() {
-                    upstream.write_request_body(body.freeze(), fin).await?;
-                }
-                if fin {
-                    break;
+    let mut send = Some(send);
+
+    loop {
+        tokio::select! {
+            frame = recv.recv(), if !downstream_finished => {
+                downstream_finished = forward_request_frame(upstream, frame).await?;
+            }
+            response = upstream.read_response_header() => {
+                response?;
+                let response = upstream
+                    .response_header()
+                    .ok_or("upstream response header missing")?
+                    .clone();
+                let sender = send.take().ok_or("downstream response sender missing")?;
+                let sender = send_response_headers(sender, &response, route).await?;
+                return relay_http_bodies(sender, upstream, recv, downstream_finished, route).await;
+            }
+        }
+    }
+}
+
+async fn relay_http_bodies(
+    mut send: OutboundFrameSender,
+    upstream: &mut HttpSession,
+    mut recv: tokio_quiche::http3::driver::InboundFrameStream,
+    mut downstream_finished: bool,
+    route: &RouteConfig,
+) -> H3Result<()> {
+    loop {
+        tokio::select! {
+            frame = recv.recv(), if !downstream_finished => {
+                downstream_finished = forward_request_frame(upstream, frame).await?;
+            }
+            chunk = upstream.read_response_body() => {
+                match chunk {
+                    Ok(Some(chunk)) => {
+                        if !chunk.is_empty() {
+                            send.send(OutboundFrame::Body(chunk, false)).await?;
+                        }
+                    }
+                    Ok(None) => {
+                        send_response_trailers_or_fin(send, upstream, route).await?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(Box::new(e)),
                 }
             }
-            InboundFrame::Datagram(_) => {}
+        }
+    }
+}
+
+async fn forward_request_frame(
+    upstream: &mut HttpSession,
+    frame: Option<InboundFrame>,
+) -> H3Result<bool> {
+    match frame {
+        Some(InboundFrame::Body(body, fin)) => {
+            if !body.is_empty() {
+                upstream.write_request_body(body.freeze(), false).await?;
+            }
+            if fin {
+                upstream.finish_request_body().await?;
+                return Ok(true);
+            }
+        }
+        Some(InboundFrame::Datagram(_)) => {}
+        None => {
+            upstream.finish_request_body().await?;
+            return Ok(true);
         }
     }
 
-    upstream.finish_request_body().await?;
-    Ok(())
+    Ok(false)
 }
 
 async fn proxy_websocket_tunnel(
@@ -705,6 +756,14 @@ async fn send_response_body(
         }
     }
 
+    send_response_trailers_or_fin(send, upstream, route).await
+}
+
+async fn send_response_trailers_or_fin(
+    mut send: OutboundFrameSender,
+    upstream: &mut HttpSession,
+    route: &RouteConfig,
+) -> H3Result<()> {
     if let Some(trailers) = read_response_trailers(upstream).await? {
         let trailers = response_trailers_to_h3(trailers, route);
         if !trailers.is_empty() {
