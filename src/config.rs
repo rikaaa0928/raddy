@@ -237,6 +237,10 @@ pub enum Protocol {
     Http,
     /// HTTPS with TLS
     Https,
+    /// HTTP/2 without TLS (h2c)
+    H2c,
+    /// HTTP/2 with TLS
+    H2,
     /// gRPC over HTTP/2
     Grpc,
     /// gRPC over HTTP/2 with TLS
@@ -250,7 +254,10 @@ pub enum Protocol {
 impl Protocol {
     /// Returns true if this protocol uses TLS
     pub fn is_tls(&self) -> bool {
-        matches!(self, Protocol::Https | Protocol::GrpcTls | Protocol::Wss)
+        matches!(
+            self,
+            Protocol::Https | Protocol::H2 | Protocol::GrpcTls | Protocol::Wss
+        )
     }
 
     /// Returns true if this protocol is WebSocket based
@@ -258,9 +265,12 @@ impl Protocol {
         matches!(self, Protocol::Ws | Protocol::Wss)
     }
 
-    /// Returns true if this protocol is gRPC based
-    pub fn is_grpc(&self) -> bool {
-        matches!(self, Protocol::Grpc | Protocol::GrpcTls)
+    /// Returns true if this protocol requires HTTP/2 upstream transport.
+    pub fn is_http2(&self) -> bool {
+        matches!(
+            self,
+            Protocol::H2c | Protocol::H2 | Protocol::Grpc | Protocol::GrpcTls
+        )
     }
 }
 
@@ -598,6 +608,20 @@ routes:
         assert_eq!(r3.hosts, Some(vec!["test.com".to_string()]));
         assert_eq!(r3.path_prefix, Some("/v1".to_string()));
         assert_eq!(r3.upstream.url, "127.0.0.1:8082");
+    }
+
+    #[test]
+    fn test_deserialize_http2_upstream_protocols() {
+        let h2c: Protocol = serde_yaml::from_str("h2c").unwrap();
+        let h2: Protocol = serde_yaml::from_str("h2").unwrap();
+
+        assert_eq!(h2c, Protocol::H2c);
+        assert!(h2c.is_http2());
+        assert!(!h2c.is_tls());
+
+        assert_eq!(h2, Protocol::H2);
+        assert!(h2.is_http2());
+        assert!(h2.is_tls());
     }
 
     #[test]

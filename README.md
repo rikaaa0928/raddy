@@ -7,7 +7,7 @@ Raddy is a high-performance, lightweight reverse proxy built on [Cloudflare Ping
 ## Features
 
 - **Built on Pingora**: Leverages the high-performance, memory-safe architecture of Cloudflare's proxy framework.
-- **Protocol Support**: Full support for HTTP/1.1, HTTP/2, HTTP/3, gRPC (h2c/TLS), and WebSockets (WS/WSS).
+- **Protocol Support**: Full support for HTTP/1.1, HTTP/2, HTTP/3, gRPC/ConnectRPC over HTTP/2, and WebSockets (WS/WSS).
 - **Auto SSL (ACME)**: Built-in integration with Let's Encrypt for automatic certificate issuance and renewal.
 - **TLS Hot-Reload**: Certificates are automatically reloaded after renewal without server restart.
 - **Per-Domain TLS**: Flexible per-domain certificate configuration with SNI-based certificate selection.
@@ -99,11 +99,11 @@ routes:
       Host: "$host"
       X-Custom-Header: "Raddy-Proxy"
 
-  # gRPC with TLS
+  # HTTP/2 upstream with TLS (gRPC/ConnectRPC)
   - host: "grpc.example.com"
     upstream:
       url: "127.0.0.1:50051"
-      protocol: grpc_tls
+      protocol: h2
 
   # WebSocket
   - host: "ws.example.com"
@@ -130,7 +130,7 @@ routes:
       - path_prefix: "/grpc.Service/"
         upstream:
           url: "127.0.0.1:50051"
-          protocol: grpc
+          protocol: h2c
 
       # Default route for the same hosts
       - upstream:
@@ -144,7 +144,7 @@ Only `host`/`hosts` and `http3` are inherited from the parent route group. Other
 
 HTTP/3 is enabled by default when HTTPS and TLS are configured. Raddy listens on the same port as HTTPS, using TCP for HTTP/1.1 and HTTP/2 and UDP for HTTP/3.
 
-HTTP/3 ingress can proxy to HTTP/1.1/HTTPS, gRPC over HTTP/2 (`grpc`/`grpc_tls`), and WebSocket upstreams (`ws`/`wss`). WebSocket over HTTP/3 uses extended CONNECT (`:protocol = websocket`) and is translated to the upstream HTTP/1.1 Upgrade handshake. To disable the UDP listener globally:
+HTTP/3 ingress can proxy to HTTP/1.1/HTTPS, HTTP/2 upstreams (`h2c`/`h2`) for gRPC or ConnectRPC, and WebSocket upstreams (`ws`/`wss`). WebSocket over HTTP/3 uses extended CONNECT (`:protocol = websocket`) and is translated to the upstream HTTP/1.1 Upgrade handshake. To disable the UDP listener globally:
 
 ```yaml
 listen:
@@ -251,8 +251,10 @@ headers:
 |------------|-----------------------------|
 | `http`     | Plain HTTP                  |
 | `https`    | HTTPS with TLS              |
-| `grpc`     | gRPC over HTTP/2 (h2c)      |
-| `grpc_tls` | gRPC over HTTP/2 with TLS   |
+| `h2c`      | HTTP/2 without TLS          |
+| `h2`       | HTTP/2 with TLS             |
+| `grpc`     | Legacy alias for `h2c`      |
+| `grpc_tls` | Legacy alias for `h2`       |
 | `ws`       | WebSocket                   |
 | `wss`      | WebSocket Secure            |
 

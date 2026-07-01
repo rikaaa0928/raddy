@@ -189,7 +189,7 @@ impl Http3ConnectionHandler {
             authority,
             upstream_request,
             route,
-            is_grpc,
+            is_http2_upstream,
             is_websocket,
             recv,
             read_fin,
@@ -215,7 +215,7 @@ impl Http3ConnectionHandler {
 
         let (host, port, use_tls) = parse_upstream(&route)?;
         let mut peer = HttpPeer::new((host.as_str(), port), use_tls, host.clone());
-        if is_grpc {
+        if is_http2_upstream {
             peer.options.alpn = ALPN::H2;
         } else {
             peer.options.set_http_version(1, 1);
@@ -300,9 +300,9 @@ impl Http3ConnectionHandler {
         if add_upstream_path(&mut upstream_request, &route).is_err() {
             return Err((send, 400, "Invalid upstream request URI"));
         }
-        let is_grpc =
-            route.upstream.protocol.is_grpc() || request_content_type_is_grpc(&upstream_request);
-        if is_grpc && upstream_request.insert_header("te", "trailers").is_err() {
+        let is_http2_upstream =
+            route.upstream.protocol.is_http2() || request_content_type_is_grpc(&upstream_request);
+        if is_http2_upstream && upstream_request.insert_header("te", "trailers").is_err() {
             return Err((send, 400, "Invalid upstream request"));
         }
         if is_websocket && ensure_websocket_upgrade_headers(&mut upstream_request).is_err() {
@@ -315,7 +315,7 @@ impl Http3ConnectionHandler {
             authority: parsed.authority,
             upstream_request,
             route,
-            is_grpc,
+            is_http2_upstream,
             is_websocket,
             recv,
             read_fin,
@@ -330,7 +330,7 @@ struct H3Request {
     authority: Option<String>,
     upstream_request: RequestHeader,
     route: RouteConfig,
-    is_grpc: bool,
+    is_http2_upstream: bool,
     is_websocket: bool,
     recv: tokio_quiche::http3::driver::InboundFrameStream,
     read_fin: bool,
@@ -443,8 +443,8 @@ fn parse_upstream(route: &RouteConfig) -> H3Result<(String, u16, bool)> {
     let parsed = Url::parse(&route.upstream.url)?;
     let host = parsed.host_str().ok_or("upstream URL has no host")?;
     let default_port = match route.upstream.protocol {
-        Protocol::Http | Protocol::Ws | Protocol::Grpc => 80,
-        Protocol::Https | Protocol::Wss | Protocol::GrpcTls => 443,
+        Protocol::Http | Protocol::Ws | Protocol::H2c | Protocol::Grpc => 80,
+        Protocol::Https | Protocol::Wss | Protocol::H2 | Protocol::GrpcTls => 443,
     };
     Ok((
         host.to_string(),
