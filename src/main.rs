@@ -1,6 +1,5 @@
 mod acme;
 mod config;
-mod http3;
 mod proxy;
 mod tls;
 
@@ -14,7 +13,6 @@ use std::sync::Arc;
 
 use acme::{AcmeBackgroundService, CertKeyPair, CertStore, CertificateManager, ChallengeStore};
 use config::Config;
-use http3::Http3Service;
 use proxy::ProxyService;
 use tls::DynamicCert;
 
@@ -83,11 +81,6 @@ fn main() {
     }
     if let Some(addr) = config.https_addr() {
         info!("HTTPS Listen address: {}", addr);
-        if config.listen.http3 {
-            info!("HTTP/3 UDP Listen address: {}", addr);
-        } else {
-            info!("HTTP/3 UDP listener disabled by configuration");
-        }
     }
     info!("Routes configured: {}", config.routes.len());
 
@@ -222,17 +215,6 @@ fn main() {
             "acme renewal",
             AcmeBackgroundService::new(acme_managers),
         ));
-    }
-
-    if config.listen.http3 {
-        if config.https_addr().is_some() && config.listen.tls.is_some() {
-            server.add_service(background_service(
-                "http3 listener",
-                Http3Service::new(config.clone(), cert_store.clone()),
-            ));
-        } else {
-            warn!("HTTP/3 is enabled but HTTPS/TLS is not fully configured; UDP listener skipped");
-        }
     }
 
     // Run the server

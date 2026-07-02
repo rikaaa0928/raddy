@@ -69,9 +69,6 @@ pub struct ListenConfig {
     /// TLS certificate configurations (required if https_port is specified)
     /// Each entry defines domains and their certificate source (ACME or file)
     pub tls: Option<Vec<TlsCertConfig>>,
-    /// Global HTTP/3 listener switch. When disabled, no UDP listener is started.
-    #[serde(default = "default_true", alias = "h3")]
-    pub http3: bool,
     /// Global force HTTPS redirect
     #[serde(default)]
     pub force_https_redirect: bool,
@@ -87,10 +84,6 @@ fn default_cert_dir() -> String {
 
 fn default_renew_before_days() -> u32 {
     7
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_downstream_keepalive_secs() -> Option<u64> {
@@ -180,8 +173,6 @@ enum RawRouteConfig {
             deserialize_with = "deserialize_string_or_vec"
         )]
         hosts: Option<Vec<String>>,
-        #[serde(default, alias = "h3")]
-        http3: Option<bool>,
         paths: Vec<RouteConfig>,
     },
     Single(Box<RouteConfig>),
@@ -196,17 +187,10 @@ where
 
     for raw in raw_routes {
         match raw {
-            RawRouteConfig::WithPaths {
-                hosts,
-                http3,
-                paths,
-            } => {
+            RawRouteConfig::WithPaths { hosts, paths } => {
                 for mut path in paths {
                     if path.hosts.is_none() {
                         path.hosts = hosts.clone();
-                    }
-                    if path.http3.is_none() {
-                        path.http3 = http3;
                     }
                     routes.push(path);
                 }
@@ -243,9 +227,6 @@ pub struct RouteConfig {
     pub hide_headers: Vec<String>,
     /// Force HTTPS redirect for this route (overrides global setting)
     pub force_https_redirect: Option<bool>,
-    /// HTTP/3 switch for this route (defaults to enabled)
-    #[serde(default, alias = "h3")]
-    pub http3: Option<bool>,
     /// Path rewriting configuration
     pub rewrite: Option<RewriteConfig>,
     /// Compiled regex for path rewriting (internal use)
@@ -256,13 +237,6 @@ pub struct RouteConfig {
     /// Compiled regex for query rewriting (internal use)
     #[serde(skip)]
     pub rewrite_query_regex: Option<regex::Regex>,
-}
-
-impl RouteConfig {
-    /// Whether this route accepts HTTP/3 requests.
-    pub fn http3_enabled(&self) -> bool {
-        self.http3.unwrap_or(true)
-    }
 }
 
 /// Path rewriting configuration
@@ -538,7 +512,6 @@ upstream:
             headers: Default::default(),
             hide_headers: Default::default(),
             force_https_redirect: None,
-            http3: None,
             rewrite: None,
             rewrite_regex: None,
             rewrite_query: None,
@@ -554,7 +527,6 @@ upstream:
                 http_port: None,
                 https_port: None,
                 tls: None,
-                http3: true,
                 force_https_redirect: false,
             },
             timeouts: TimeoutConfig::default(),
@@ -696,70 +668,6 @@ routes:
         assert_eq!(h2, Protocol::H2);
         assert!(h2.is_http2());
         assert!(h2.is_tls());
-    }
-
-    #[test]
-    fn test_http3_defaults_to_enabled() {
-        let yaml = r#"
-listen:
-  address: "0.0.0.0"
-  https_port: 443
-routes:
-  - host: "example.com"
-    upstream:
-      url: "http://127.0.0.1:8080"
-      protocol: http
-"#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.listen.http3);
-        assert!(config.routes[0].http3_enabled());
-    }
-
-    #[test]
-    fn test_http3_can_be_disabled_globally_and_per_route() {
-        let yaml = r#"
-listen:
-  address: "0.0.0.0"
-  https_port: 443
-  http3: false
-routes:
-  - host: "example.com"
-    http3: false
-    upstream:
-      url: "http://127.0.0.1:8080"
-      protocol: http
-"#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert!(!config.listen.http3);
-        assert_eq!(config.routes[0].http3, Some(false));
-        assert!(!config.routes[0].http3_enabled());
-    }
-
-    #[test]
-    fn test_http3_inherits_from_route_group() {
-        let yaml = r#"
-listen:
-  address: "0.0.0.0"
-  https_port: 443
-routes:
-  - hosts: ["example.com"]
-    http3: false
-    paths:
-      - path_prefix: "/api"
-        upstream:
-          url: "http://127.0.0.1:8080"
-          protocol: http
-      - path_prefix: "/public"
-        http3: true
-        upstream:
-          url: "http://127.0.0.1:8081"
-          protocol: http
-"#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.routes[0].http3, Some(false));
-        assert!(!config.routes[0].http3_enabled());
-        assert_eq!(config.routes[1].http3, Some(true));
-        assert!(config.routes[1].http3_enabled());
     }
 
     #[test]
