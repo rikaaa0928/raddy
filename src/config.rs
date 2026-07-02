@@ -7,9 +7,52 @@ use std::path::Path;
 pub struct Config {
     /// Listen configuration
     pub listen: ListenConfig,
+    /// Proxy timeout configuration
+    #[serde(default)]
+    pub timeouts: TimeoutConfig,
     /// Route configurations
     #[serde(deserialize_with = "deserialize_routes")]
     pub routes: Vec<RouteConfig>,
+}
+
+/// Proxy timeout configuration. Values are expressed in seconds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// Downstream keepalive timeout. Set to null to leave Pingora's default behavior.
+    #[serde(default = "default_downstream_keepalive_secs")]
+    pub downstream_keepalive_secs: Option<u64>,
+    /// Timeout for establishing an upstream connection.
+    #[serde(default = "default_upstream_connect_secs")]
+    pub upstream_connect_secs: Option<u64>,
+    /// Total timeout for establishing an upstream connection.
+    #[serde(default = "default_upstream_total_connect_secs")]
+    pub upstream_total_connect_secs: Option<u64>,
+    /// Timeout for reading from upstream. Defaults to unset.
+    #[serde(default)]
+    pub upstream_read_secs: Option<u64>,
+    /// Timeout for writing to upstream. Defaults to unset.
+    #[serde(default)]
+    pub upstream_write_secs: Option<u64>,
+    /// Upstream idle timeout for local upstream hosts.
+    #[serde(default = "default_local_upstream_idle_secs")]
+    pub local_upstream_idle_secs: Option<u64>,
+    /// Upstream idle timeout for non-local upstream hosts.
+    #[serde(default = "default_remote_upstream_idle_secs")]
+    pub remote_upstream_idle_secs: Option<u64>,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            downstream_keepalive_secs: default_downstream_keepalive_secs(),
+            upstream_connect_secs: default_upstream_connect_secs(),
+            upstream_total_connect_secs: default_upstream_total_connect_secs(),
+            upstream_read_secs: None,
+            upstream_write_secs: None,
+            local_upstream_idle_secs: default_local_upstream_idle_secs(),
+            remote_upstream_idle_secs: default_remote_upstream_idle_secs(),
+        }
+    }
 }
 
 /// Listen address configuration
@@ -48,6 +91,36 @@ fn default_renew_before_days() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_downstream_keepalive_secs() -> Option<u64> {
+    Some(15)
+}
+
+fn default_upstream_connect_secs() -> Option<u64> {
+    Some(3)
+}
+
+fn default_upstream_total_connect_secs() -> Option<u64> {
+    Some(10)
+}
+
+fn default_local_upstream_idle_secs() -> Option<u64> {
+    Some(5)
+}
+
+fn default_remote_upstream_idle_secs() -> Option<u64> {
+    Some(15)
+}
+
+impl TimeoutConfig {
+    pub fn upstream_idle_secs(&self, is_local: bool) -> Option<u64> {
+        if is_local {
+            self.local_upstream_idle_secs
+        } else {
+            self.remote_upstream_idle_secs
+        }
+    }
 }
 
 /// Per-domain TLS certificate configuration
@@ -474,6 +547,7 @@ upstream:
                 http3: true,
                 force_https_redirect: false,
             },
+            timeouts: TimeoutConfig::default(),
             routes,
         };
 
@@ -662,5 +736,59 @@ routes:
         assert!(!config.routes[0].http3_enabled());
         assert_eq!(config.routes[1].http3, Some(true));
         assert!(config.routes[1].http3_enabled());
+    }
+
+    #[test]
+    fn test_timeout_defaults() {
+        let yaml = r#"
+listen:
+  address: "0.0.0.0"
+  http_port: 80
+routes:
+  - host: "example.com"
+    upstream:
+      url: "http://127.0.0.1:8080"
+      protocol: http
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.timeouts.downstream_keepalive_secs, Some(15));
+        assert_eq!(config.timeouts.upstream_connect_secs, Some(3));
+        assert_eq!(config.timeouts.upstream_total_connect_secs, Some(10));
+        assert_eq!(config.timeouts.upstream_read_secs, None);
+        assert_eq!(config.timeouts.upstream_write_secs, None);
+        assert_eq!(config.timeouts.local_upstream_idle_secs, Some(5));
+        assert_eq!(config.timeouts.remote_upstream_idle_secs, Some(15));
+    }
+
+    #[test]
+    fn test_timeout_overrides_and_nulls() {
+        let yaml = r#"
+listen:
+  address: "0.0.0.0"
+  http_port: 80
+timeouts:
+  downstream_keepalive_secs: null
+  upstream_connect_secs: 7
+  upstream_total_connect_secs: 20
+  upstream_read_secs: 60
+  upstream_write_secs: null
+  local_upstream_idle_secs: null
+  remote_upstream_idle_secs: 30
+routes:
+  - host: "example.com"
+    upstream:
+      url: "http://127.0.0.1:8080"
+      protocol: http
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.timeouts.downstream_keepalive_secs, None);
+        assert_eq!(config.timeouts.upstream_connect_secs, Some(7));
+        assert_eq!(config.timeouts.upstream_total_connect_secs, Some(20));
+        assert_eq!(config.timeouts.upstream_read_secs, Some(60));
+        assert_eq!(config.timeouts.upstream_write_secs, None);
+        assert_eq!(config.timeouts.local_upstream_idle_secs, None);
+        assert_eq!(config.timeouts.remote_upstream_idle_secs, Some(30));
     }
 }

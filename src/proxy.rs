@@ -20,13 +20,6 @@ pub struct ProxyService {
 }
 
 impl ProxyService {
-    const DOWNSTREAM_KEEPALIVE_SECS: u64 = 15;
-    const UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 3;
-    const UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS: u64 = 10;
-    const UPSTREAM_IO_TIMEOUT_SECS: u64 = 30;
-    const LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = 5;
-    const REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = 15;
-
     /// Create a new proxy service with the given configuration
     pub fn new(config: Arc<Config>, is_tls: bool, challenge_store: Arc<ChallengeStore>) -> Self {
         Self {
@@ -144,6 +137,10 @@ impl ProxyService {
         let https_port = self.config.listen.https_port?;
         Some(format!("h3=\":{}\"; ma=86400", https_port))
     }
+
+    fn is_local_upstream(host: &str) -> bool {
+        matches!(host, "127.0.0.1" | "localhost" | "::1")
+    }
 }
 
 /// Context passed between request phases
@@ -175,7 +172,7 @@ impl ProxyHttp for ProxyService {
     ) -> Result<bool, Box<pingora::Error>> {
         session
             .as_downstream_mut()
-            .set_keepalive(Some(Self::DOWNSTREAM_KEEPALIVE_SECS));
+            .set_keepalive(self.config.timeouts.downstream_keepalive_secs);
 
         let req_header = session.req_header();
         let path = req_header.uri.path();
@@ -351,20 +348,16 @@ impl ProxyHttp for ProxyService {
         );
 
         let mut peer = HttpPeer::new((host.as_str(), port), use_tls, host.clone());
-        peer.options.connection_timeout =
-            Some(Duration::from_secs(Self::UPSTREAM_CONNECT_TIMEOUT_SECS));
-        peer.options.total_connection_timeout = Some(Duration::from_secs(
-            Self::UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS,
-        ));
-        peer.options.read_timeout = Some(Duration::from_secs(Self::UPSTREAM_IO_TIMEOUT_SECS));
-        peer.options.write_timeout = Some(Duration::from_secs(Self::UPSTREAM_IO_TIMEOUT_SECS));
-        peer.options.idle_timeout = Some(Duration::from_secs(
-            if host == "127.0.0.1" || host == "localhost" {
-                Self::LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS
-            } else {
-                Self::REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS
-            },
-        ));
+        let timeouts = &self.config.timeouts;
+        peer.options.connection_timeout = timeouts.upstream_connect_secs.map(Duration::from_secs);
+        peer.options.total_connection_timeout = timeouts
+            .upstream_total_connect_secs
+            .map(Duration::from_secs);
+        peer.options.read_timeout = timeouts.upstream_read_secs.map(Duration::from_secs);
+        peer.options.write_timeout = timeouts.upstream_write_secs.map(Duration::from_secs);
+        peer.options.idle_timeout = timeouts
+            .upstream_idle_secs(Self::is_local_upstream(&host))
+            .map(Duration::from_secs);
 
         // Configure for HTTP/2 if gRPC
         if is_grpc {
