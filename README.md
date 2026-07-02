@@ -83,6 +83,18 @@ listen:
         cert_path: "/path/to/cert.pem"
         key_path: "/path/to/key.pem"
 
+timeouts:
+  # All timeout values are in seconds. Set a field to null to leave it unset.
+  downstream_keepalive_secs: 15
+  upstream_connect_secs: 3
+  upstream_total_connect_secs: 10
+  # Read/write timeouts are unset by default, which is useful for streaming,
+  # WebSocket, and long-lived gRPC requests.
+  upstream_read_secs: null
+  upstream_write_secs: null
+  local_upstream_idle_secs: 5
+  remote_upstream_idle_secs: 15
+
 routes:
   # Multi-host routing
   - host:

@@ -31,12 +31,6 @@ use crate::config::{Config, Protocol, RouteConfig};
 
 type H3Result<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 3;
-const UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS: u64 = 10;
-const UPSTREAM_IO_TIMEOUT_SECS: u64 = 30;
-const LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = 5;
-const REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = 15;
-
 /// HTTP/3 UDP ingress service backed by tokio-quiche.
 pub struct Http3Service {
     config: Arc<Config>,
@@ -221,16 +215,16 @@ impl Http3ConnectionHandler {
         } else {
             peer.options.set_http_version(1, 1);
         }
-        peer.options.connection_timeout = Some(Duration::from_secs(UPSTREAM_CONNECT_TIMEOUT_SECS));
-        peer.options.total_connection_timeout =
-            Some(Duration::from_secs(UPSTREAM_TOTAL_CONNECT_TIMEOUT_SECS));
-        peer.options.read_timeout = Some(Duration::from_secs(UPSTREAM_IO_TIMEOUT_SECS));
-        peer.options.write_timeout = Some(Duration::from_secs(UPSTREAM_IO_TIMEOUT_SECS));
-        peer.options.idle_timeout = Some(Duration::from_secs(if is_local_upstream(&host) {
-            LOCAL_UPSTREAM_IDLE_TIMEOUT_SECS
-        } else {
-            REMOTE_UPSTREAM_IDLE_TIMEOUT_SECS
-        }));
+        let timeouts = &self.config.timeouts;
+        peer.options.connection_timeout = timeouts.upstream_connect_secs.map(Duration::from_secs);
+        peer.options.total_connection_timeout = timeouts
+            .upstream_total_connect_secs
+            .map(Duration::from_secs);
+        peer.options.read_timeout = timeouts.upstream_read_secs.map(Duration::from_secs);
+        peer.options.write_timeout = timeouts.upstream_write_secs.map(Duration::from_secs);
+        peer.options.idle_timeout = timeouts
+            .upstream_idle_secs(is_local_upstream(&host))
+            .map(Duration::from_secs);
 
         let (mut upstream, _) = self.connector.get_http_session(&peer).await?;
         let proxy_result = async {

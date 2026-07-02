@@ -81,6 +81,17 @@ listen:
         cert_path: "/path/to/cert.pem"
         key_path: "/path/to/key.pem"
 
+timeouts:
+  # 所有超时时间单位都是秒。设置为 null 表示不设置该 timeout。
+  downstream_keepalive_secs: 15
+  upstream_connect_secs: 3
+  upstream_total_connect_secs: 10
+  # 读写超时默认不设置，适合流式响应、WebSocket 和长时间 gRPC 请求。
+  upstream_read_secs: null
+  upstream_write_secs: null
+  local_upstream_idle_secs: 5
+  remote_upstream_idle_secs: 15
+
 routes:
   # 多主机路由
   - host:
