@@ -1,6 +1,6 @@
 [package]
 name = "raddy"
-version = "0.1.3-dev.5"
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
 
