@@ -46,8 +46,8 @@ impl ProxyService {
         })?;
 
         let default_port = match route.upstream.protocol {
-            Protocol::Http | Protocol::Ws | Protocol::Grpc => 80,
-            Protocol::Https | Protocol::Wss | Protocol::GrpcTls => 443,
+            Protocol::Http | Protocol::Ws | Protocol::H2c | Protocol::Grpc => 80,
+            Protocol::Https | Protocol::Wss | Protocol::H2 | Protocol::GrpcTls => 443,
         };
 
         let port = parsed.port().unwrap_or(default_port);
@@ -149,8 +149,8 @@ pub struct ProxyContext {
     pub route: Option<RouteConfig>,
     /// Whether this is a WebSocket upgrade request
     pub is_websocket: bool,
-    /// Whether this is a gRPC request
-    pub is_grpc: bool,
+    /// Whether this request should use HTTP/2 upstream transport
+    pub is_http2_upstream: bool,
 }
 
 #[async_trait]
@@ -161,7 +161,7 @@ impl ProxyHttp for ProxyService {
         ProxyContext {
             route: None,
             is_websocket: false,
-            is_grpc: false,
+            is_http2_upstream: false,
         }
     }
 
@@ -326,25 +326,25 @@ impl ProxyHttp for ProxyService {
             .unwrap_or(false)
             || route.upstream.protocol.is_websocket();
 
-        // Check for gRPC
-        let is_grpc = req_header
+        // Use HTTP/2 upstream for explicit h2/h2c/grpc protocols, or detected gRPC requests.
+        let is_http2_upstream = req_header
             .headers
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .map(|v| v.starts_with("application/grpc"))
             .unwrap_or(false)
-            || route.upstream.protocol.is_grpc();
+            || route.upstream.protocol.is_http2();
 
         // Store context
         ctx.is_websocket = is_websocket;
-        ctx.is_grpc = is_grpc;
+        ctx.is_http2_upstream = is_http2_upstream;
 
         // Parse upstream and create peer
         let (host, port, use_tls) = Self::parse_upstream(route)?;
 
         debug!(
-            "Upstream peer: {}:{}, TLS={}, WebSocket={}, gRPC={}",
-            host, port, use_tls, is_websocket, is_grpc
+            "Upstream peer: {}:{}, TLS={}, WebSocket={}, HTTP/2={}",
+            host, port, use_tls, is_websocket, is_http2_upstream
         );
 
         let mut peer = HttpPeer::new((host.as_str(), port), use_tls, host.clone());
@@ -359,8 +359,8 @@ impl ProxyHttp for ProxyService {
             .upstream_idle_secs(Self::is_local_upstream(&host))
             .map(Duration::from_secs);
 
-        // Configure for HTTP/2 if gRPC
-        if is_grpc {
+        // Configure for HTTP/2 upstream when requested.
+        if is_http2_upstream {
             peer.options.alpn = pingora::protocols::ALPN::H2;
         }
 
@@ -512,9 +512,9 @@ impl ProxyHttp for ProxyService {
             );
         }
 
-        // For gRPC, ensure proper content-type
-        if ctx.is_grpc {
-            debug!("gRPC request, preserving gRPC headers");
+        // For HTTP/2 upstream protocols, preserve protocol-specific headers.
+        if ctx.is_http2_upstream {
+            debug!("HTTP/2 upstream request, preserving protocol-specific headers");
         }
 
         // Add X-Forwarded-For and X-Real-IP headers

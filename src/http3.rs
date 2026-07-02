@@ -6,10 +6,12 @@ use log::{debug, error, info, warn};
 use pingora::connectors::http::Connector as HttpConnector;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::protocols::http::client::HttpSession;
+use pingora::protocols::ALPN;
 use pingora::server::ShutdownWatch;
 use pingora::services::background::BackgroundService;
 use pingora::upstreams::peer::HttpPeer;
 use std::error::Error;
+use std::future::poll_fn;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -104,8 +106,11 @@ impl BackgroundService for Http3Service {
                 conn = accepted.next() => {
                     match conn {
                         Some(Ok(conn)) => {
-                            let (driver, mut controller) =
-                                ServerH3Driver::new(Http3Settings::default());
+                            let http3_settings = Http3Settings {
+                                enable_extended_connect: true,
+                                ..Http3Settings::default()
+                            };
+                            let (driver, mut controller) = ServerH3Driver::new(http3_settings);
                             conn.start(driver);
 
                             let handler = handler.clone();
@@ -179,6 +184,8 @@ impl Http3ConnectionHandler {
             authority,
             upstream_request,
             route,
+            is_http2_upstream,
+            is_websocket,
             recv,
             read_fin,
             send,
@@ -196,17 +203,6 @@ impl Http3ConnectionHandler {
             return Ok(());
         }
 
-        if route.upstream.protocol.is_grpc() || route.upstream.protocol.is_websocket() {
-            let mut send = send;
-            send_simple_response(
-                &mut send,
-                501,
-                "HTTP/3 proxying currently supports HTTP and HTTPS upstreams",
-            )
-            .await;
-            return Ok(());
-        }
-
         info!(
             "HTTP/3 request: authority={:?}, method={}, path={}, upstream={}",
             authority, method, path, route.upstream.url
@@ -214,7 +210,11 @@ impl Http3ConnectionHandler {
 
         let (host, port, use_tls) = parse_upstream(&route)?;
         let mut peer = HttpPeer::new((host.as_str(), port), use_tls, host.clone());
-        peer.options.set_http_version(1, 1);
+        if is_http2_upstream {
+            peer.options.alpn = ALPN::H2;
+        } else {
+            peer.options.set_http_version(1, 1);
+        }
         let timeouts = &self.config.timeouts;
         peer.options.connection_timeout = timeouts.upstream_connect_secs.map(Duration::from_secs);
         peer.options.total_connection_timeout = timeouts
@@ -231,15 +231,11 @@ impl Http3ConnectionHandler {
             upstream
                 .write_request_header(Box::new(upstream_request))
                 .await?;
-            write_request_body(&mut upstream, recv, read_fin).await?;
-            upstream.read_response_header().await?;
-
-            let response = upstream
-                .response_header()
-                .ok_or("upstream response header missing")?
-                .clone();
-            let send = send_response_headers(send, &response, &route).await?;
-            send_response_body(send, &mut upstream).await
+            if is_websocket {
+                proxy_websocket_tunnel(send, &mut upstream, recv, read_fin, &route).await
+            } else {
+                proxy_http_stream(send, &mut upstream, recv, read_fin, &route).await
+            }
         }
         .await;
 
@@ -270,16 +266,34 @@ impl Http3ConnectionHandler {
             None => return Err((send, 404, "No matching route")),
         };
 
-        let mut upstream_request = match build_upstream_request(&headers, &parsed, &route) {
-            Ok(request) => request,
-            Err(_) => return Err((send, 400, "Invalid upstream request")),
-        };
+        let is_websocket = route.upstream.protocol.is_websocket() || parsed.is_websocket_connect();
+        if is_websocket && !parsed.is_websocket_connect() {
+            return Err((
+                send,
+                400,
+                "HTTP/3 WebSocket proxying requires extended CONNECT",
+            ));
+        }
+
+        let mut upstream_request =
+            match build_upstream_request(&headers, &parsed, &route, is_websocket) {
+                Ok(request) => request,
+                Err(_) => return Err((send, 400, "Invalid upstream request")),
+            };
 
         if let Some(new_uri) = rewrite_uri(&upstream_request.uri, &route).ok().flatten() {
             upstream_request.set_uri(new_uri);
         }
         if add_upstream_path(&mut upstream_request, &route).is_err() {
             return Err((send, 400, "Invalid upstream request URI"));
+        }
+        let is_http2_upstream =
+            route.upstream.protocol.is_http2() || request_content_type_is_grpc(&upstream_request);
+        if is_http2_upstream && upstream_request.insert_header("te", "trailers").is_err() {
+            return Err((send, 400, "Invalid upstream request"));
+        }
+        if is_websocket && ensure_websocket_upgrade_headers(&mut upstream_request).is_err() {
+            return Err((send, 400, "Invalid upstream WebSocket request"));
         }
 
         Ok(H3Request {
@@ -288,6 +302,8 @@ impl Http3ConnectionHandler {
             authority: parsed.authority,
             upstream_request,
             route,
+            is_http2_upstream,
+            is_websocket,
             recv,
             read_fin,
             send,
@@ -301,6 +317,8 @@ struct H3Request {
     authority: Option<String>,
     upstream_request: RequestHeader,
     route: RouteConfig,
+    is_http2_upstream: bool,
+    is_websocket: bool,
     recv: tokio_quiche::http3::driver::InboundFrameStream,
     read_fin: bool,
     send: OutboundFrameSender,
@@ -311,6 +329,7 @@ struct ParsedH3Headers {
     path: String,
     authority: Option<String>,
     host_header: Option<String>,
+    protocol: Option<String>,
 }
 
 impl ParsedH3Headers {
@@ -319,12 +338,14 @@ impl ParsedH3Headers {
         let mut path = None;
         let mut authority = None;
         let mut host_header = None;
+        let mut protocol = None;
 
         for header in headers {
             match header.name() {
                 b":method" => method = Some(header_value_to_string(header.value())?),
                 b":path" => path = Some(header_value_to_string(header.value())?),
                 b":authority" => authority = Some(header_value_to_string(header.value())?),
+                b":protocol" => protocol = Some(header_value_to_string(header.value())?),
                 b"host" => host_header = Some(header_value_to_string(header.value())?),
                 _ => {}
             }
@@ -335,6 +356,7 @@ impl ParsedH3Headers {
             path: path.unwrap_or_else(|| "/".to_string()),
             authority,
             host_header,
+            protocol,
         })
     }
 
@@ -349,14 +371,27 @@ impl ParsedH3Headers {
     fn original_host(&self) -> Option<&str> {
         self.host_header.as_deref().or(self.authority.as_deref())
     }
+
+    fn is_websocket_connect(&self) -> bool {
+        self.method.eq_ignore_ascii_case("CONNECT")
+            && self
+                .protocol
+                .as_deref()
+                .is_some_and(|protocol| protocol.eq_ignore_ascii_case("websocket"))
+    }
 }
 
 fn build_upstream_request(
     headers: &[Header],
     parsed: &ParsedH3Headers,
     route: &RouteConfig,
+    is_websocket: bool,
 ) -> H3Result<RequestHeader> {
-    let method = http::Method::from_bytes(parsed.method.as_bytes())?;
+    let method = if is_websocket {
+        http::Method::GET
+    } else {
+        http::Method::from_bytes(parsed.method.as_bytes())?
+    };
     let mut request = RequestHeader::build(method, parsed.path.as_bytes(), Some(headers.len()))?;
 
     for header in headers {
@@ -395,8 +430,8 @@ fn parse_upstream(route: &RouteConfig) -> H3Result<(String, u16, bool)> {
     let parsed = Url::parse(&route.upstream.url)?;
     let host = parsed.host_str().ok_or("upstream URL has no host")?;
     let default_port = match route.upstream.protocol {
-        Protocol::Http | Protocol::Ws | Protocol::Grpc => 80,
-        Protocol::Https | Protocol::Wss | Protocol::GrpcTls => 443,
+        Protocol::Http | Protocol::Ws | Protocol::H2c | Protocol::Grpc => 80,
+        Protocol::Https | Protocol::Wss | Protocol::H2 | Protocol::GrpcTls => 443,
     };
     Ok((
         host.to_string(),
@@ -472,32 +507,238 @@ fn rewrite_uri(uri: &http::Uri, route: &RouteConfig) -> H3Result<Option<http::Ur
     Ok(Some(http::Uri::from_parts(parts)?))
 }
 
-async fn write_request_body(
+fn request_content_type_is_grpc(request: &RequestHeader) -> bool {
+    request
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/grpc"))
+}
+
+fn ensure_websocket_upgrade_headers(request: &mut RequestHeader) -> H3Result<()> {
+    request.insert_header(http::header::CONNECTION, "Upgrade")?;
+    request.insert_header(http::header::UPGRADE, "websocket")?;
+    if !request.headers.contains_key("sec-websocket-version") {
+        request.insert_header("sec-websocket-version", "13")?;
+    }
+    Ok(())
+}
+
+async fn proxy_http_stream(
+    send: OutboundFrameSender,
+    upstream: &mut HttpSession,
+    mut recv: tokio_quiche::http3::driver::InboundFrameStream,
+    read_fin: bool,
+    route: &RouteConfig,
+) -> H3Result<()> {
+    let mut downstream_finished = read_fin;
+    if downstream_finished {
+        upstream.finish_request_body().await?;
+    }
+
+    let mut send = Some(send);
+
+    loop {
+        tokio::select! {
+            frame = recv.recv(), if !downstream_finished => {
+                downstream_finished = forward_request_frame(upstream, frame).await?;
+            }
+            response = read_response_header_cancel_safe(upstream) => {
+                response?;
+                let response = upstream
+                    .response_header()
+                    .ok_or("upstream response header missing")?
+                    .clone();
+                let sender = send.take().ok_or("downstream response sender missing")?;
+                let sender = send_response_headers(sender, &response, route).await?;
+                return relay_http_bodies(sender, upstream, recv, downstream_finished, route).await;
+            }
+        }
+    }
+}
+
+async fn relay_http_bodies(
+    mut send: OutboundFrameSender,
+    upstream: &mut HttpSession,
+    mut recv: tokio_quiche::http3::driver::InboundFrameStream,
+    mut downstream_finished: bool,
+    route: &RouteConfig,
+) -> H3Result<()> {
+    loop {
+        tokio::select! {
+            frame = recv.recv(), if !downstream_finished => {
+                downstream_finished = forward_request_frame(upstream, frame).await?;
+            }
+            chunk = read_response_body_cancel_safe(upstream) => {
+                match chunk {
+                    Ok(Some(chunk)) => {
+                        if !chunk.is_empty() {
+                            send.send(OutboundFrame::Body(chunk, false)).await?;
+                        }
+                    }
+                    Ok(None) => {
+                        send_response_trailers_or_fin(send, upstream, route).await?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+}
+
+async fn read_response_header_cancel_safe(upstream: &mut HttpSession) -> H3Result<()> {
+    if let HttpSession::H2(h2) = upstream {
+        poll_fn(|cx| h2.poll_read_response_header(cx))
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        return Ok(());
+    }
+
+    upstream.read_response_header().await?;
+    Ok(())
+}
+
+async fn read_response_body_cancel_safe(upstream: &mut HttpSession) -> H3Result<Option<Bytes>> {
+    if let HttpSession::H2(h2) = upstream {
+        return match poll_fn(|cx| h2.poll_read_response_body(cx)).await {
+            Some(Ok(chunk)) => Ok(Some(chunk)),
+            Some(Err(e)) => Err(Box::new(e) as Box<dyn Error + Send + Sync>),
+            None => Ok(None),
+        };
+    }
+
+    Ok(upstream.read_response_body().await?)
+}
+
+async fn forward_request_frame(
+    upstream: &mut HttpSession,
+    frame: Option<InboundFrame>,
+) -> H3Result<bool> {
+    match frame {
+        Some(InboundFrame::Body(body, fin)) => {
+            if !body.is_empty() {
+                upstream.write_request_body(body.freeze(), false).await?;
+            }
+            if fin {
+                upstream.finish_request_body().await?;
+                return Ok(true);
+            }
+        }
+        Some(InboundFrame::Datagram(_)) => {}
+        None => {
+            upstream.finish_request_body().await?;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn proxy_websocket_tunnel(
+    send: OutboundFrameSender,
+    upstream: &mut HttpSession,
+    recv: tokio_quiche::http3::driver::InboundFrameStream,
+    read_fin: bool,
+    route: &RouteConfig,
+) -> H3Result<()> {
+    upstream.read_response_header().await?;
+    let response = upstream
+        .response_header()
+        .ok_or("upstream response header missing")?
+        .clone();
+
+    if response.status != http::StatusCode::SWITCHING_PROTOCOLS {
+        let send = send_response_headers(send, &response, route).await?;
+        return send_response_body(send, upstream, route).await;
+    }
+
+    maybe_upgrade_body_writer(upstream);
+    let send = send_websocket_connect_response(send, &response, route).await?;
+    relay_websocket_data(send, upstream, recv, read_fin).await
+}
+
+fn maybe_upgrade_body_writer(upstream: &mut HttpSession) {
+    if let HttpSession::H1(h1) = upstream {
+        h1.maybe_upgrade_body_writer();
+    }
+}
+
+async fn send_websocket_connect_response(
+    mut send: OutboundFrameSender,
+    response: &ResponseHeader,
+    route: &RouteConfig,
+) -> H3Result<OutboundFrameSender> {
+    let mut headers = vec![Header::new(b":status", b"200")];
+
+    for (name, value) in response.headers.iter() {
+        let name_bytes = name.as_str().as_bytes();
+        let keep_websocket_response_header = matches!(
+            name.as_str().to_ascii_lowercase().as_str(),
+            "sec-websocket-accept" | "sec-websocket-protocol" | "sec-websocket-extensions"
+        );
+        if !keep_websocket_response_header
+            || route
+                .hide_headers
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(name.as_str()))
+        {
+            continue;
+        }
+        headers.push(Header::new(name_bytes, value.as_bytes()));
+    }
+
+    send.send(OutboundFrame::Headers(headers, None)).await?;
+    Ok(send)
+}
+
+async fn relay_websocket_data(
+    mut send: OutboundFrameSender,
     upstream: &mut HttpSession,
     mut recv: tokio_quiche::http3::driver::InboundFrameStream,
     read_fin: bool,
 ) -> H3Result<()> {
-    if read_fin {
+    let mut downstream_finished = read_fin;
+    if downstream_finished {
         upstream.finish_request_body().await?;
-        return Ok(());
     }
 
-    while let Some(frame) = recv.recv().await {
-        match frame {
-            InboundFrame::Body(body, fin) => {
-                if !body.is_empty() {
-                    upstream.write_request_body(body.freeze(), fin).await?;
-                }
-                if fin {
-                    break;
+    loop {
+        tokio::select! {
+            frame = recv.recv(), if !downstream_finished => {
+                match frame {
+                    Some(InboundFrame::Body(body, fin)) => {
+                        if !body.is_empty() {
+                            upstream.write_request_body(body.freeze(), false).await?;
+                        }
+                        if fin {
+                            downstream_finished = true;
+                            upstream.finish_request_body().await?;
+                        }
+                    }
+                    Some(InboundFrame::Datagram(_)) => {}
+                    None => {
+                        downstream_finished = true;
+                        upstream.finish_request_body().await?;
+                    }
                 }
             }
-            InboundFrame::Datagram(_) => {}
+            chunk = upstream.read_response_body() => {
+                match chunk {
+                    Ok(Some(chunk)) => {
+                        if !chunk.is_empty() {
+                            send.send(OutboundFrame::Body(chunk, false)).await?;
+                        }
+                    }
+                    Ok(None) => {
+                        send.send(OutboundFrame::Body(Bytes::new(), true)).await?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(Box::new(e)),
+                }
+            }
         }
     }
-
-    upstream.finish_request_body().await?;
-    Ok(())
 }
 
 async fn send_response_headers(
@@ -526,14 +767,56 @@ async fn send_response_headers(
 async fn send_response_body(
     mut send: OutboundFrameSender,
     upstream: &mut HttpSession,
+    route: &RouteConfig,
 ) -> H3Result<()> {
     while let Some(chunk) = upstream.read_response_body().await? {
         if !chunk.is_empty() {
             send.send(OutboundFrame::Body(chunk, false)).await?;
         }
     }
+
+    send_response_trailers_or_fin(send, upstream, route).await
+}
+
+async fn send_response_trailers_or_fin(
+    mut send: OutboundFrameSender,
+    upstream: &mut HttpSession,
+    route: &RouteConfig,
+) -> H3Result<()> {
+    if let Some(trailers) = read_response_trailers(upstream).await? {
+        let trailers = response_trailers_to_h3(trailers, route);
+        if !trailers.is_empty() {
+            send.send(OutboundFrame::Trailers(trailers, None)).await?;
+            return Ok(());
+        }
+    }
+
     send.send(OutboundFrame::Body(Bytes::new(), true)).await?;
     Ok(())
+}
+
+async fn read_response_trailers(upstream: &mut HttpSession) -> H3Result<Option<http::HeaderMap>> {
+    match upstream {
+        HttpSession::H2(h2) => Ok(h2.read_trailers().await?),
+        HttpSession::H1(_) | HttpSession::Custom(_) => Ok(None),
+    }
+}
+
+fn response_trailers_to_h3(trailers: http::HeaderMap, route: &RouteConfig) -> Vec<Header> {
+    let mut headers = Vec::with_capacity(trailers.len());
+    for (name, value) in trailers.iter() {
+        if name.as_str().starts_with(':')
+            || is_hop_by_hop_header(name.as_str().as_bytes())
+            || route
+                .hide_headers
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(name.as_str()))
+        {
+            continue;
+        }
+        headers.push(Header::new(name.as_str().as_bytes(), value.as_bytes()));
+    }
+    headers
 }
 
 async fn send_simple_response(send: &mut OutboundFrameSender, status: u16, body: &'static str) {
@@ -628,4 +911,99 @@ fn apply_cert_to_ssl(ssl: &mut SslRef, cert: &ParsedCert) -> Result<(), boring::
     }
     ssl.set_private_key(&cert.private_key)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UpstreamConfig;
+    use std::collections::HashMap;
+
+    fn test_route(protocol: Protocol) -> RouteConfig {
+        RouteConfig {
+            hosts: None,
+            path_prefix: None,
+            upstream: UpstreamConfig {
+                url: "http://backend.example".to_string(),
+                protocol,
+            },
+            headers: HashMap::new(),
+            hide_headers: Vec::new(),
+            force_https_redirect: None,
+            http3: None,
+            rewrite: None,
+            rewrite_regex: None,
+            rewrite_query: None,
+            rewrite_query_regex: None,
+        }
+    }
+
+    #[test]
+    fn parses_websocket_extended_connect() {
+        let headers = vec![
+            Header::new(b":method", b"CONNECT"),
+            Header::new(b":protocol", b"websocket"),
+            Header::new(b":path", b"/chat"),
+            Header::new(b":authority", b"example.com"),
+        ];
+
+        let parsed = ParsedH3Headers::from_headers(&headers).unwrap();
+
+        assert!(parsed.is_websocket_connect());
+        assert_eq!(parsed.path, "/chat");
+        assert_eq!(parsed.authority.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn websocket_upstream_request_uses_get_and_upgrade_headers() {
+        let route = test_route(Protocol::Ws);
+        let headers = vec![
+            Header::new(b":method", b"CONNECT"),
+            Header::new(b":protocol", b"websocket"),
+            Header::new(b":path", b"/chat"),
+            Header::new(b":authority", b"example.com"),
+            Header::new(b"sec-websocket-key", b"test-key"),
+        ];
+        let parsed = ParsedH3Headers::from_headers(&headers).unwrap();
+
+        let mut request = build_upstream_request(&headers, &parsed, &route, true).unwrap();
+        ensure_websocket_upgrade_headers(&mut request).unwrap();
+
+        assert_eq!(request.method, http::Method::GET);
+        assert_eq!(request.uri.path(), "/chat");
+        assert_eq!(
+            request.headers.get(http::header::UPGRADE).unwrap(),
+            "websocket"
+        );
+        assert_eq!(
+            request.headers.get(http::header::CONNECTION).unwrap(),
+            "Upgrade"
+        );
+        assert_eq!(
+            request.headers.get("sec-websocket-key").unwrap(),
+            "test-key"
+        );
+    }
+
+    #[test]
+    fn response_trailers_filter_hidden_and_hop_by_hop_headers() {
+        let mut route = test_route(Protocol::Grpc);
+        route.hide_headers = vec!["x-hidden".to_string()];
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("grpc-status", "0".parse().unwrap());
+        trailers.insert("grpc-message", "ok".parse().unwrap());
+        trailers.insert("te", "trailers".parse().unwrap());
+        trailers.insert("x-hidden", "secret".parse().unwrap());
+
+        let h3_trailers = response_trailers_to_h3(trailers, &route);
+        let names = h3_trailers
+            .iter()
+            .map(|header| header.name().to_vec())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&b"grpc-status".to_vec()));
+        assert!(names.contains(&b"grpc-message".to_vec()));
+        assert!(!names.contains(&b"te".to_vec()));
+        assert!(!names.contains(&b"x-hidden".to_vec()));
+    }
 }

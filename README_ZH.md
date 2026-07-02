@@ -5,7 +5,7 @@ Raddy 是一个基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora
 ## 功能特性
 
 - **基于 Pingora**: 利用 Cloudflare 代理框架的高性能和内存安全架构。
-- **多协议支持**: 全面支持 HTTP/1.1、HTTP/2、HTTP/3、gRPC (h2c/TLS) 以及 WebSocket (WS/WSS)。
+- **多协议支持**: 全面支持 HTTP/1.1、HTTP/2、HTTP/3、基于 HTTP/2 的 gRPC/ConnectRPC 以及 WebSocket (WS/WSS)。
 - **自动 SSL (ACME)**: 内置集成 Let's Encrypt，支持自动申请和续期 SSL 证书。
 - **TLS 热更新**: 证书续期后自动重新加载，无需重启服务器。
 - **域名级 TLS 配置**: 灵活的按域名证书配置，支持基于 SNI 的证书选择。
@@ -108,11 +108,11 @@ routes:
       Host: "$host"
       X-Custom-Header: "Raddy-Proxy"
 
-  # gRPC with TLS
+  # 带 TLS 的 HTTP/2 上游 (gRPC/ConnectRPC)
   - host: "grpc.example.com"
     upstream:
       url: "127.0.0.1:50051"
-      protocol: grpc_tls
+      protocol: h2
 
   # WebSocket
   - host: "ws.example.com"
@@ -139,7 +139,7 @@ routes:
       - path_prefix: "/grpc.Service/"
         upstream:
           url: "127.0.0.1:50051"
-          protocol: grpc
+          protocol: h2c
 
       # 同一组 hosts 的默认路由
       - upstream:
@@ -151,7 +151,9 @@ routes:
 
 ### HTTP/3
 
-当 HTTPS 和 TLS 配置完整时，HTTP/3 默认开启。Raddy 会复用 HTTPS 端口：TCP 处理 HTTP/1.1 和 HTTP/2，UDP 处理 HTTP/3。全局关闭 HTTP/3 后不会启动 UDP listener：
+当 HTTPS 和 TLS 配置完整时，HTTP/3 默认开启。Raddy 会复用 HTTPS 端口：TCP 处理 HTTP/1.1 和 HTTP/2，UDP 处理 HTTP/3。
+
+HTTP/3 入栈可以代理到 HTTP/1.1/HTTPS、用于 gRPC 或 ConnectRPC 的 HTTP/2 上游 (`h2c`/`h2`) 以及 WebSocket 上游 (`ws`/`wss`)。WebSocket over HTTP/3 使用 extended CONNECT (`:protocol = websocket`)，Raddy 会将其转换为上游 HTTP/1.1 Upgrade 握手。全局关闭 HTTP/3 后不会启动 UDP listener：
 
 ```yaml
 listen:
@@ -257,8 +259,10 @@ headers:
 |------------|-----------------------------|
 | `http`     | 纯 HTTP                     |
 | `https`    | 带 TLS 的 HTTPS             |
-| `grpc`     | 基于 HTTP/2 的 gRPC (h2c)   |
-| `grpc_tls` | 带 TLS 的 HTTP/2 gRPC       |
+| `h2c`      | 不带 TLS 的 HTTP/2          |
+| `h2`       | 带 TLS 的 HTTP/2            |
+| `grpc`     | `h2c` 的兼容别名            |
+| `grpc_tls` | `h2` 的兼容别名             |
 | `ws`       | WebSocket                   |
 | `wss`      | 安全 WebSocket              |
 
