@@ -235,7 +235,28 @@ impl ProxyHttp for ProxyService {
 
         // Check for redirect if not TLS
         if !self.is_tls {
-            let should_redirect = if let Some(r) = &route {
+            let is_proto_https = req_header
+                .headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| {
+                    v.split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("https")
+                })
+                .unwrap_or(false)
+                || req_header
+                    .headers
+                    .get("cf-visitor")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.contains("\"scheme\":\"https\""))
+                    .unwrap_or(false);
+
+            let should_redirect = if is_proto_https {
+                false
+            } else if let Some(r) = &route {
                 r.force_https_redirect
                     .unwrap_or(self.config.listen.force_https_redirect)
             } else {

@@ -33,7 +33,7 @@ impl pingora::listeners::TlsAccept for DynamicCert {
         // Extract SNI (Server Name Indication) from the SSL context
         let sni = ssl
             .servername(pingora::tls::ssl::NameType::HOST_NAME)
-            .map(|s| s.to_string());
+            .map(|s| s.trim_end_matches('.').to_ascii_lowercase());
 
         debug!("TLS handshake with SNI: {:?}", sni);
 

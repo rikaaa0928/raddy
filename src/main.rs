@@ -131,14 +131,14 @@ fn main() {
                             cert_store.store_for_domains(&domains, cert);
                         }
                         Ok(None) => {
-                            provision_temp_cert(&acme_config.cert_dir, &domains, &cert_store);
+                            provision_temp_cert(&acme_config, &domains, &cert_store);
                         }
                         Err(e) => {
                             warn!(
                                 "Failed to load existing certificate for {:?}: {}",
                                 domains, e
                             );
-                            provision_temp_cert(&acme_config.cert_dir, &domains, &cert_store);
+                            provision_temp_cert(&acme_config, &domains, &cert_store);
                         }
                     }
 
@@ -251,7 +251,11 @@ fn generate_temp_cert(domains: &[String]) -> Result<CertKeyPair, Box<dyn std::er
     })
 }
 
-fn provision_temp_cert(cert_dir: &str, domains: &[String], cert_store: &Arc<CertStore>) {
+fn provision_temp_cert(
+    acme_config: &acme::AcmeManagerConfig,
+    domains: &[String],
+    cert_store: &Arc<CertStore>,
+) {
     info!(
         "No valid certificate found for {:?}, will request after server starts",
         domains
@@ -259,10 +263,14 @@ fn provision_temp_cert(cert_dir: &str, domains: &[String], cert_store: &Arc<Cert
 
     let temp_cert = generate_temp_cert(domains).expect("Failed to generate temporary certificate");
 
-    std::fs::create_dir_all(cert_dir).expect("Failed to create cert directory");
+    let cert_path = acme_config.target_cert_path();
+    let key_path = acme_config.target_key_path();
 
-    let cert_path = format!("{}/cert.pem", cert_dir);
-    let key_path = format!("{}/key.pem", cert_dir);
+    if let Some(parent) = std::path::Path::new(&cert_path).parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!("Failed to create cert directory {:?}: {}", parent, e);
+        }
+    }
 
     temp_cert
         .save_to_files(&cert_path, &key_path)

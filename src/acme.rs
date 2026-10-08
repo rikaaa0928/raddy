@@ -190,7 +190,11 @@ impl CertStore {
         // Store PEM data
         let mut certs = (**self.certs.load()).clone();
         for domain in domains {
-            certs.insert(domain.clone(), cert.clone());
+            let clean = domain.trim_end_matches('.').to_ascii_lowercase();
+            certs.insert(clean.clone(), cert.clone());
+            if clean != *domain {
+                certs.insert(domain.clone(), cert.clone());
+            }
         }
         self.certs.store(Arc::new(certs));
 
@@ -198,7 +202,11 @@ impl CertStore {
         if let Some(ref parsed) = parsed {
             let mut parsed_map = (**self.parsed_certs.load()).clone();
             for domain in domains {
-                parsed_map.insert(domain.clone(), parsed.clone());
+                let clean = domain.trim_end_matches('.').to_ascii_lowercase();
+                parsed_map.insert(clean.clone(), parsed.clone());
+                if clean != *domain {
+                    parsed_map.insert(domain.clone(), parsed.clone());
+                }
             }
             self.parsed_certs.store(Arc::new(parsed_map));
         }
@@ -206,15 +214,17 @@ impl CertStore {
 
     /// Get certificate for a specific domain
     pub fn get_for_domain(&self, domain: &str) -> Option<Arc<CertKeyPair>> {
+        let clean = domain.trim_end_matches('.').to_ascii_lowercase();
         let certs = self.certs.load();
-        certs.get(domain).cloned()
+        certs.get(&clean).cloned().or_else(|| certs.get(domain).cloned())
     }
 
     /// Get pre-parsed certificate for a configured domain.
     /// This avoids PEM re-parsing on every TLS handshake.
     pub fn get_parsed_for_domain(&self, domain: &str) -> Option<Arc<ParsedCert>> {
+        let clean = domain.trim_end_matches('.').to_ascii_lowercase();
         let parsed = self.parsed_certs.load();
-        parsed.get(domain).cloned()
+        parsed.get(&clean).cloned().or_else(|| parsed.get(domain).cloned())
     }
 }
 
@@ -276,6 +286,82 @@ impl AcmeManagerConfig {
             staging: source.staging,
         }
     }
+
+    /// Primary domain used for namespacing certificate files
+    pub fn primary_domain(&self) -> Option<String> {
+        self.domains
+            .first()
+            .map(|d| d.trim_end_matches('.').to_ascii_lowercase())
+    }
+
+    /// Domain-specific certificate directory to prevent collisions
+    pub fn cert_dir_for_domains(&self) -> String {
+        if let Some(primary) = self.primary_domain() {
+            format!("{}/{}", self.cert_dir.trim_end_matches('/'), primary)
+        } else {
+            self.cert_dir.clone()
+        }
+    }
+
+    /// Path to certificate file, checking domain-specific directory first,
+    /// then falling back to base directory for backwards compatibility.
+    pub fn cert_path(&self) -> String {
+        let domain_dir = self.cert_dir_for_domains();
+        let domain_cert = format!("{}/cert.pem", domain_dir);
+        if Path::new(&domain_cert).exists() {
+            domain_cert
+        } else {
+            let base_cert = format!("{}/cert.pem", self.cert_dir.trim_end_matches('/'));
+            if Path::new(&base_cert).exists() {
+                base_cert
+            } else {
+                domain_cert
+            }
+        }
+    }
+
+    /// Path to private key file, checking domain-specific directory first,
+    /// then falling back to base directory for backwards compatibility.
+    pub fn key_path(&self) -> String {
+        let domain_dir = self.cert_dir_for_domains();
+        let domain_key = format!("{}/key.pem", domain_dir);
+        if Path::new(&domain_key).exists() {
+            domain_key
+        } else {
+            let base_key = format!("{}/key.pem", self.cert_dir.trim_end_matches('/'));
+            if Path::new(&base_key).exists() {
+                base_key
+            } else {
+                domain_key
+            }
+        }
+    }
+
+    /// Target path where new certificates will be written
+    pub fn target_cert_path(&self) -> String {
+        format!("{}/cert.pem", self.cert_dir_for_domains())
+    }
+
+    /// Target path where new private keys will be written
+    pub fn target_key_path(&self) -> String {
+        format!("{}/key.pem", self.cert_dir_for_domains())
+    }
+
+    /// Path to ACME account credentials
+    pub fn account_path(&self) -> String {
+        let domain_dir = self.cert_dir_for_domains();
+        let domain_account = format!("{}/account.json", domain_dir);
+        if Path::new(&domain_account).exists() {
+            domain_account
+        } else {
+            let base_account = format!("{}/account.json", self.cert_dir.trim_end_matches('/'));
+            if Path::new(&base_account).exists() {
+                base_account
+            } else {
+                domain_account
+            }
+        }
+    }
 }
 
 /// ACME Certificate Manager
@@ -330,8 +416,8 @@ impl CertificateManager {
     pub fn load_existing_cert(
         &self,
     ) -> Result<Option<CertKeyPair>, Box<dyn std::error::Error + Send + Sync>> {
-        let cert_path = format!("{}/cert.pem", self.config.cert_dir);
-        let key_path = format!("{}/key.pem", self.config.cert_dir);
+        let cert_path = self.config.cert_path();
+        let key_path = self.config.key_path();
 
         if Path::new(&cert_path).exists() && Path::new(&key_path).exists() {
             match CertKeyPair::load_from_files(&cert_path, &key_path) {
@@ -339,15 +425,16 @@ impl CertificateManager {
                     // Check if certificate covers all configured domains
                     if !cert_pair.covers_domains(&self.config.domains) {
                         info!(
-                            "Existing certificate does not cover all configured domains, renewal needed"
+                            "Existing certificate at {:?} does not cover all configured domains {:?}, renewal needed",
+                            cert_path, self.config.domains
                         );
                         return Ok(None);
                     }
 
                     if !cert_pair.needs_renewal(self.config.renew_before_days) {
                         info!(
-                            "Loaded existing certificate, expires at: {}",
-                            cert_pair.expires_at
+                            "Loaded existing certificate from {:?}, expires at: {}",
+                            cert_path, cert_pair.expires_at
                         );
                         return Ok(Some(cert_pair));
                     } else {
@@ -356,15 +443,15 @@ impl CertificateManager {
                         // The background task will handle the renewal
                         if cert_pair.expires_at > Utc::now() {
                             info!(
-                                "Loaded existing certificate (needing renewal), expires at: {}",
-                                cert_pair.expires_at
+                                "Loaded existing certificate from {:?} (needing renewal), expires at: {}",
+                                cert_path, cert_pair.expires_at
                             );
                             return Ok(Some(cert_pair));
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to load existing certificate: {}", e);
+                    warn!("Failed to load existing certificate from {:?}: {}", cert_path, e);
                 }
             }
         }
@@ -376,10 +463,10 @@ impl CertificateManager {
         &mut self,
     ) -> Result<&Account, Box<dyn std::error::Error + Send + Sync>> {
         if self.account.is_none() {
-            let account_path = format!("{}/account.json", self.config.cert_dir);
-
-            // Ensure cert directory exists
-            std::fs::create_dir_all(&self.config.cert_dir)?;
+            let account_path = self.config.account_path();
+            if let Some(parent) = Path::new(&account_path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
 
             // Try to load existing account
             if Path::new(&account_path).exists() {
@@ -413,7 +500,7 @@ impl CertificateManager {
                 std::fs::write(&account_path, credentials_json)?;
 
                 self.account = Some(account);
-                info!("Created new ACME account");
+                info!("Created new ACME account at {}", account_path);
             }
         }
 
@@ -568,14 +655,17 @@ impl CertificateManager {
             expires_at: Utc::now() + Duration::days(90), // Let's Encrypt certs are valid for 90 days
         };
 
-        // Save to disk
-        let cert_path = format!("{}/cert.pem", self.config.cert_dir);
-        let key_path = format!("{}/key.pem", self.config.cert_dir);
+        // Save to disk using domain-namespaced target path
+        let cert_path = self.config.target_cert_path();
+        let key_path = self.config.target_key_path();
+        if let Some(parent) = Path::new(&cert_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         cert_pair.save_to_files(&cert_path, &key_path)?;
 
         info!(
-            "Certificate obtained successfully, expires at: {}",
-            cert_pair.expires_at
+            "Certificate obtained successfully, saved to {}, expires at: {}",
+            cert_path, cert_pair.expires_at
         );
 
         // Update cert store (hot-reload)
@@ -672,5 +762,40 @@ mod tests {
         assert!(store.get_parsed_for_domain("a.example").is_some());
         assert!(store.get_for_domain("b.example").is_none());
         assert!(store.get_parsed_for_domain("b.example").is_none());
+    }
+
+    #[test]
+    fn cert_store_matches_normalized_and_case_insensitive() {
+        let store = CertStore::new();
+        store.store_for_domains(&["Test.Example.com.".to_string()], test_cert(&["test.example.com"]));
+
+        assert!(store.get_for_domain("test.example.com").is_some());
+        assert!(store.get_for_domain("TEST.EXAMPLE.COM.").is_some());
+        assert!(store.get_parsed_for_domain("test.example.com").is_some());
+        assert!(store.get_parsed_for_domain("Test.Example.Com.").is_some());
+    }
+
+    #[test]
+    fn acme_config_domain_paths_isolation() {
+        let config1 = AcmeManagerConfig {
+            email: "admin@example.com".to_string(),
+            domains: vec!["a.example.com".to_string()],
+            directory_url: "https://example.com".to_string(),
+            cert_dir: "./certs".to_string(),
+            renew_before_days: 30,
+            staging: false,
+        };
+        let config2 = AcmeManagerConfig {
+            email: "admin@example.com".to_string(),
+            domains: vec!["b.example.com".to_string()],
+            directory_url: "https://example.com".to_string(),
+            cert_dir: "./certs".to_string(),
+            renew_before_days: 30,
+            staging: false,
+        };
+
+        assert_eq!(config1.target_cert_path(), "./certs/a.example.com/cert.pem");
+        assert_eq!(config2.target_cert_path(), "./certs/b.example.com/cert.pem");
+        assert_ne!(config1.target_cert_path(), config2.target_cert_path());
     }
 }
