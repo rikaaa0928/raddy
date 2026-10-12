@@ -163,6 +163,12 @@ pub struct CertStore {
     parsed_certs: ArcSwap<HashMap<String, Arc<ParsedCert>>>,
 }
 
+impl Default for CertStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CertStore {
     pub fn new() -> Self {
         Self {
@@ -226,11 +232,23 @@ impl CertStore {
         let parsed = self.parsed_certs.load();
         parsed.get(&clean).cloned().or_else(|| parsed.get(domain).cloned())
     }
+
+    /// Get any available certificate from the store as a fallback
+    pub fn get_any_cert(&self) -> Option<Arc<CertKeyPair>> {
+        let certs = self.certs.load();
+        certs.values().next().cloned()
+    }
 }
 
 /// HTTP-01 challenge token store for ACME validation
 pub struct ChallengeStore {
     tokens: RwLock<HashMap<String, String>>,
+}
+
+impl Default for ChallengeStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChallengeStore {

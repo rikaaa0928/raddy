@@ -72,6 +72,14 @@ pub struct ListenConfig {
     /// Global force HTTPS redirect
     #[serde(default)]
     pub force_https_redirect: bool,
+    /// Enable HTTP/3 support over QUIC (defaults to true if TLS and https_port are configured)
+    #[serde(default)]
+    pub http3: Option<bool>,
+    /// HTTP/3 UDP listen port (defaults to https_port if not specified)
+    pub http3_port: Option<u16>,
+    /// HTTP/2 TCP upstream target for HTTP/3 reverse proxy (e.g. "127.0.0.1:8443")
+    /// Defaults to 127.0.0.1:{https_port} (via TLS) or 127.0.0.1:{http_port} (cleartext h2c)
+    pub h2_target_addr: Option<String>,
 }
 
 fn default_acme_directory() -> String {
@@ -396,6 +404,55 @@ impl Config {
             .map(|port| format!("{}:{}", self.listen.address, port))
     }
 
+    /// Returns true if HTTP/3 is enabled
+    pub fn is_http3_enabled(&self) -> bool {
+        self.listen.http3.unwrap_or(true)
+            && self.listen.tls.is_some()
+            && (self.listen.http3_port.is_some() || self.listen.https_port.is_some())
+    }
+
+    /// Get the HTTP/3 port if enabled
+    pub fn http3_port(&self) -> Option<u16> {
+        if self.is_http3_enabled() {
+            self.listen.http3_port.or(self.listen.https_port)
+        } else {
+            None
+        }
+    }
+
+    /// Get the HTTP/3 listen address as a string in "address:port" format
+    pub fn http3_addr(&self) -> Option<String> {
+        self.http3_port()
+            .map(|port| format!("{}:{}", self.listen.address, port))
+    }
+
+    /// Get the HTTP/2 target address and whether it uses TLS: (target_addr, is_tls)
+    pub fn h2_target(&self) -> Option<(String, bool)> {
+        if let Some(target) = &self.listen.h2_target_addr {
+            let is_tls = target.starts_with("https://")
+                || target.starts_with("tls://")
+                || (!target.starts_with("http://") && !target.starts_with("h2c://"));
+            let clean = target
+                .trim_start_matches("https://")
+                .trim_start_matches("tls://")
+                .trim_start_matches("http://")
+                .trim_start_matches("h2c://");
+            return Some((clean.to_string(), is_tls));
+        }
+
+        // Default to local https_port (with TLS)
+        if let Some(port) = self.listen.https_port {
+            return Some((format!("127.0.0.1:{}", port), true));
+        }
+
+        // Or fallback to local http_port (with h2c)
+        if let Some(port) = self.listen.http_port.or(self.listen.port) {
+            return Some((format!("127.0.0.1:{}", port), false));
+        }
+
+        None
+    }
+
     /// Find a matching route for the given host(s) and path
     pub fn find_route(&self, hosts: &[&str], path: &str) -> Option<&RouteConfig> {
         // First, try to find an exact match with both host and path_prefix
@@ -528,6 +585,9 @@ upstream:
                 https_port: None,
                 tls: None,
                 force_https_redirect: false,
+                http3: None,
+                http3_port: None,
+                h2_target_addr: None,
             },
             timeouts: TimeoutConfig::default(),
             routes,
@@ -722,5 +782,79 @@ routes:
         assert_eq!(config.timeouts.upstream_write_secs, None);
         assert_eq!(config.timeouts.local_upstream_idle_secs, None);
         assert_eq!(config.timeouts.remote_upstream_idle_secs, Some(30));
+    }
+
+    #[test]
+    fn test_http3_config_defaults_and_overrides() {
+        // Default: enabled when https_port and tls are present
+        let yaml1 = r#"
+listen:
+  address: "0.0.0.0"
+  https_port: 8443
+  tls:
+    - domains: ["example.com"]
+      source:
+        type: file
+        cert_path: "cert.pem"
+        key_path: "key.pem"
+routes:
+  - host: "example.com"
+    upstream:
+      url: "http://127.0.0.1:8080"
+      protocol: http
+"#;
+        let config1: Config = serde_yaml::from_str(yaml1).unwrap();
+        assert!(config1.is_http3_enabled());
+        assert_eq!(config1.http3_port(), Some(8443));
+        assert_eq!(config1.http3_addr(), Some("0.0.0.0:8443".to_string()));
+        assert_eq!(config1.h2_target(), Some(("127.0.0.1:8443".to_string(), true)));
+
+        // Explicitly disabled
+        let yaml2 = r#"
+listen:
+  address: "0.0.0.0"
+  https_port: 8443
+  http3: false
+  tls:
+    - domains: ["example.com"]
+      source:
+        type: file
+        cert_path: "cert.pem"
+        key_path: "key.pem"
+routes:
+  - host: "example.com"
+    upstream:
+      url: "http://127.0.0.1:8080"
+      protocol: http
+"#;
+        let config2: Config = serde_yaml::from_str(yaml2).unwrap();
+        assert!(!config2.is_http3_enabled());
+        assert_eq!(config2.http3_port(), None);
+        assert_eq!(config2.http3_addr(), None);
+
+        // Custom http3 port and custom h2 target
+        let yaml3 = r#"
+listen:
+  address: "127.0.0.1"
+  https_port: 8443
+  http3_port: 9443
+  h2_target_addr: "http://127.0.0.1:8080"
+  tls:
+    - domains: ["example.com"]
+      source:
+        type: file
+        cert_path: "cert.pem"
+        key_path: "key.pem"
+routes:
+  - host: "example.com"
+    upstream:
+      url: "http://127.0.0.1:8080"
+      protocol: http
+"#;
+        let config3: Config = serde_yaml::from_str(yaml3).unwrap();
+        assert!(config3.is_http3_enabled());
+        assert_eq!(config3.http3_port(), Some(9443));
+        assert_eq!(config3.http3_addr(), Some("127.0.0.1:9443".to_string()));
+        assert_eq!(config3.h2_target(), Some(("127.0.0.1:8080".to_string(), false)));
     }
 }

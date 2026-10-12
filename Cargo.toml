@@ -1,6 +1,6 @@
 [package]
 name = "raddy"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "MIT"
 
@@ -13,9 +13,15 @@ mimalloc = { version = "0.1.52", default-features = false }
 pingora = { version = "0.8.1", default-features = false, features = ["proxy", "boringssl"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
-tokio = { version = "1.52.3", default-features = false, features = ["macros", "sync", "time"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "sync", "time", "net", "io-util", "rt"] }
 url = "2.5.8"
 regex = "1.12.4"
+quiche = "0.30.0"
+boring = "4.22"
+tokio-boring = "4.22"
+h2 = "0.4"
+bytes = "1.10"
+ring = "0.17"
 
 
 # ACME certificate management

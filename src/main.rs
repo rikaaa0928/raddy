@@ -1,20 +1,18 @@
-mod acme;
-mod config;
-mod proxy;
-mod tls;
-
 use log::{error, info, warn};
 use mimalloc::MiMalloc;
 use pingora::prelude::*;
+use std::sync::Arc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-use std::sync::Arc;
 
-use acme::{AcmeBackgroundService, CertKeyPair, CertStore, CertificateManager, ChallengeStore};
-use config::Config;
-use proxy::ProxyService;
-use tls::DynamicCert;
+use raddy::acme::{
+    self, AcmeBackgroundService, CertKeyPair, CertStore, CertificateManager, ChallengeStore,
+};
+use raddy::config::{self, Config};
+use raddy::http3::Http3Service;
+use raddy::proxy::ProxyService;
+use raddy::tls::DynamicCert;
 
 fn main() {
     // Initialize logging
@@ -207,6 +205,22 @@ fn main() {
         } else {
             error!("HTTPS port configured but TLS config is missing");
             std::process::exit(1);
+        }
+    }
+
+    // Setup HTTP/3 listener if enabled
+    if config.is_http3_enabled() {
+        if let (Some(h3_addr), Some(h2_target)) = (config.http3_addr(), config.h2_target()) {
+            info!("Initializing HTTP/3 listener on UDP {}", h3_addr);
+            let h3_service = Http3Service::new(
+                config.clone(),
+                cert_store.clone(),
+                h3_addr,
+                h2_target,
+            );
+            server.add_service(background_service("http3 proxy", h3_service));
+        } else {
+            warn!("HTTP/3 is enabled but address or local HTTP/2 target could not be determined");
         }
     }
 

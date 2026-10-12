@@ -5,7 +5,8 @@ Raddy 是一个基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora
 ## 功能特性
 
 - **基于 Pingora**: 利用 Cloudflare 代理框架的高性能和内存安全架构。
-- **多协议支持**: 全面支持 HTTP/1.1、HTTP/2、基于 HTTP/2 的 gRPC/ConnectRPC 以及 WebSocket (WS/WSS)。
+- **多协议支持**: 全面支持 HTTP/1.1、HTTP/2、HTTP/3 (QUIC)、基于 HTTP/2 的 gRPC/ConnectRPC 以及 WebSocket (WS/WSS)。
+- **HTTP/3 (QUIC)**: 基于 Cloudflare Quiche，加载动态证书并反向代理给本地 HTTP/2，完整处理 `X-Forwarded-*`、`X-Real-IP`，并自动注入 `Alt-Svc` 头部。
 - **自动 SSL (ACME)**: 内置集成 Let's Encrypt，支持自动申请和续期 SSL 证书。
 - **TLS 热更新**: 证书续期后自动重新加载，无需重启服务器。
 - **域名级 TLS 配置**: 灵活的按域名证书配置，支持基于 SNI 的证书选择。
@@ -57,6 +58,11 @@ listen:
   http_port: 80
   https_port: 443
   
+  # HTTP/3 (QUIC) 配置（可选，配置了 https_port 和 tls 时默认启用）
+  # http3: true
+  # http3_port: 443                    # 默认同 https_port
+  # h2_target_addr: "127.0.0.1:443"    # 默认反代至本地 https_port (TLS)
+
   # 按域名配置 TLS
   tls:
     # ACME 自动证书

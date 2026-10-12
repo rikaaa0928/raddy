@@ -533,15 +533,24 @@ impl ProxyHttp for ProxyService {
         if let Some(client_addr) = session.client_addr() {
             if let Some(ip) = client_addr.as_inet() {
                 let ip_str = ip.ip().to_string();
+                let is_loopback = ip.ip().is_loopback();
 
-                // Set X-Real-IP
-                let _ = upstream_request.insert_header("X-Real-IP", ip_str.clone());
+                // If request comes from loopback (e.g. internal HTTP/3 reverse proxy)
+                // and already has X-Real-IP, preserve original client IP.
+                let has_real_ip = session.req_header().headers.get("X-Real-IP").is_some();
+                if !(is_loopback && has_real_ip) {
+                    let _ = upstream_request.insert_header("X-Real-IP", ip_str.clone());
+                }
 
                 // Set or append to X-Forwarded-For
                 if let Some(existing_xff) = session.req_header().headers.get("X-Forwarded-For") {
                     if let Ok(xff_str) = existing_xff.to_str() {
-                        let new_xff = format!("{}, {}", xff_str, ip_str);
-                        let _ = upstream_request.insert_header("X-Forwarded-For", new_xff);
+                        if !is_loopback {
+                            let new_xff = format!("{}, {}", xff_str, ip_str);
+                            let _ = upstream_request.insert_header("X-Forwarded-For", new_xff);
+                        } else {
+                            let _ = upstream_request.insert_header("X-Forwarded-For", xff_str);
+                        }
                     }
                 } else {
                     let _ = upstream_request.insert_header("X-Forwarded-For", ip_str);
@@ -565,6 +574,15 @@ impl ProxyHttp for ProxyService {
                 debug!("Removed response header: {}", header_name);
             }
         }
+
+        // Advertise HTTP/3 support via Alt-Svc header if enabled
+        if self.is_tls {
+            if let Some(port) = self.config.http3_port() {
+                let alt_svc_value = format!("h3=\":{}\"; ma=86400", port);
+                let _ = upstream_response.insert_header("alt-svc", alt_svc_value);
+            }
+        }
+
         Ok(())
     }
 
