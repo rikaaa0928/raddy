@@ -578,7 +578,12 @@ fn flush_stream_response(client: &mut ClientState, stream_id: u64) {
     if let Some(headers) = pending.headers.take() {
         let is_empty_end = pending.finished && pending.body_queue.is_empty();
         match http3.send_response(&mut client.conn, stream_id, &headers, is_empty_end) {
-            Ok(()) => {}
+            Ok(()) => {
+                if is_empty_end {
+                    client.pending_responses.remove(&stream_id);
+                    return;
+                }
+            }
             Err(quiche::h3::Error::StreamBlocked) => {
                 pending.headers = Some(headers);
                 return;
@@ -616,6 +621,8 @@ fn flush_stream_response(client: &mut ClientState, stream_id: u64) {
     }
 
     if pending.finished && pending.body_queue.is_empty() {
+        // Send empty fin body to close the stream if needed
+        let _ = http3.send_body(&mut client.conn, stream_id, b"", true);
         client.pending_responses.remove(&stream_id);
     }
 }
