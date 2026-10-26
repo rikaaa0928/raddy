@@ -128,6 +128,7 @@ pub struct ParsedCert {
     pub leaf_cert: X509,
     pub chain_certs: Vec<X509>,
     pub private_key: PKey<Private>,
+    pub rustls_cert: Arc<rustls::sign::CertifiedKey>,
 }
 
 impl ParsedCert {
@@ -143,10 +144,25 @@ impl ParsedCert {
         let leaf_cert = certs[0].clone();
         let chain_certs: Vec<X509> = certs.into_iter().skip(1).collect();
         let private_key = PKey::private_key_from_pem(key_pem.as_bytes())?;
+
+        let mut cert_reader = std::io::BufReader::new(cert_pem.as_bytes());
+        let cert_der_chain: Vec<rustls_pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+        if cert_der_chain.is_empty() {
+            return Err("No rustls certificates found in PEM".into());
+        }
+        let mut key_reader = std::io::BufReader::new(key_pem.as_bytes());
+        let key_der = rustls_pemfile::private_key(&mut key_reader)?
+            .ok_or("No private key found in PEM")?;
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
+            .map_err(|e| format!("Unsupported private key for rustls: {e}"))?;
+        let rustls_cert = Arc::new(rustls::sign::CertifiedKey::new(cert_der_chain, signing_key));
+
         Ok(Self {
             leaf_cert,
             chain_certs,
             private_key,
+            rustls_cert,
         })
     }
 }
@@ -237,6 +253,12 @@ impl CertStore {
     pub fn get_any_cert(&self) -> Option<Arc<CertKeyPair>> {
         let certs = self.certs.load();
         certs.values().next().cloned()
+    }
+
+    /// Get any pre-parsed certificate from the store as a fallback
+    pub fn get_any_parsed_cert(&self) -> Option<Arc<ParsedCert>> {
+        let parsed = self.parsed_certs.load();
+        parsed.values().next().cloned()
     }
 }
 

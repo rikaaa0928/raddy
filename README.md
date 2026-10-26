@@ -8,7 +8,7 @@ Raddy is a high-performance, lightweight reverse proxy built on [Cloudflare Ping
 
 - **Built on Pingora**: Leverages the high-performance, memory-safe architecture of Cloudflare's proxy framework.
 - **Protocol Support**: Full support for HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC/ConnectRPC over HTTP/2, and WebSockets (WS/WSS).
-- **HTTP/3 (QUIC)**: Powered by Cloudflare Quiche, dynamically loads TLS certificates via SNI and proxies requests to local HTTP/2 with full `X-Forwarded-*` / `X-Real-IP` handling and `Alt-Svc` broadcast.
+- **HTTP/3 (QUIC)**: Powered by Quinn, dynamically loads TLS certificates via SNI and proxies requests to local HTTP/2 with full `X-Forwarded-*` / `X-Real-IP` handling and `Alt-Svc` broadcast.
 - **Auto SSL (ACME)**: Built-in integration with Let's Encrypt for automatic certificate issuance and renewal.
 - **TLS Hot-Reload**: Certificates are automatically reloaded after renewal without server restart.
 - **Per-Domain TLS**: Flexible per-domain certificate configuration with SNI-based certificate selection.

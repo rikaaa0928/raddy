@@ -14,6 +14,20 @@ use raddy::http3::Http3Service;
 use raddy::proxy::ProxyService;
 use raddy::tls::DynamicCert;
 
+const H2_STREAM_WINDOW_SIZE: u32 = 8 * 1024 * 1024;
+const H2_CONNECTION_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
+const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
+const H2_MAX_CONCURRENT_STREAMS: u32 = 256;
+
+fn build_h2_options() -> pingora::protocols::http::v2::server::H2Options {
+    let mut h2_options = pingora::protocols::http::v2::server::default_h2_options();
+    h2_options.initial_window_size(H2_STREAM_WINDOW_SIZE);
+    h2_options.initial_connection_window_size(H2_CONNECTION_WINDOW_SIZE);
+    h2_options.max_frame_size(H2_MAX_FRAME_SIZE);
+    h2_options.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS);
+    h2_options
+}
+
 fn main() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -180,6 +194,7 @@ fn main() {
         options.h2c = true;
         if let Some(logic) = http_proxy.app_logic_mut() {
             logic.server_options = Some(options);
+            logic.h2_options = Some(build_h2_options());
         }
 
         http_proxy.add_tcp(&addr);
@@ -192,6 +207,9 @@ fn main() {
             info!("Initializing HTTPS listener on {}", addr);
             let proxy_service = ProxyService::new(config.clone(), true, challenge_store.clone());
             let mut https_proxy = http_proxy_service(&server.configuration, proxy_service);
+            if let Some(logic) = https_proxy.app_logic_mut() {
+                logic.h2_options = Some(build_h2_options());
+            }
 
             // Use dynamic certificate callback for TLS with SNI-based selection
             let dynamic_cert = DynamicCert::new(cert_store.clone());
