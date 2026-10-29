@@ -343,6 +343,32 @@ async fn send_h3_error(
     }
 }
 
+async fn send_h2_data_with_flow_control(
+    h2_send: &mut h2::SendStream<Bytes>,
+    mut data: Bytes,
+    end_of_stream: bool,
+) -> Result<(), h2::Error> {
+    if data.is_empty() {
+        return h2_send.send_data(data, end_of_stream);
+    }
+    while !data.is_empty() {
+        let want = data.len();
+        h2_send.reserve_capacity(want);
+        match std::future::poll_fn(|cx| h2_send.poll_capacity(cx)).await {
+            Some(Ok(cap)) => {
+                let to_send = data.split_to(want.min(cap));
+                let is_last = data.is_empty() && end_of_stream;
+                h2_send.send_data(to_send, is_last)?;
+            }
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(h2::Reason::CANCEL.into());
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_h3_stream(
     req: http::Request<()>,
     stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
@@ -387,6 +413,21 @@ async fn handle_h3_stream(
             return;
         }
     };
+
+    let is_typically_bodyless = matches!(
+        method,
+        http::Method::GET
+            | http::Method::HEAD
+            | http::Method::DELETE
+            | http::Method::OPTIONS
+            | http::Method::TRACE
+    ) && parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+        == 0;
 
     let mut req_builder = http::Request::builder().method(method).uri(target_uri);
 
@@ -448,21 +489,26 @@ async fn handle_h3_stream(
         }
     };
 
-    // Peek first body chunk from H3 to determine if request body is empty
-    let first_chunk = match h3_recv.recv_data().await {
-        Ok(Some(mut buf)) => {
-            let len = buf.remaining();
-            if len > 0 {
-                Some(buf.copy_to_bytes(len))
-            } else {
-                None
+    // For GET/HEAD/DELETE without content-length, peek to see if stream is already finished.
+    // For POST/PUT/streaming requests, open the H2 stream immediately without blocking on first body frame.
+    let first_chunk = if is_typically_bodyless {
+        match h3_recv.recv_data().await {
+            Ok(Some(mut buf)) => {
+                let len = buf.remaining();
+                if len > 0 {
+                    Some(buf.copy_to_bytes(len))
+                } else {
+                    None
+                }
+            }
+            Ok(None) => None,
+            Err(e) => {
+                debug!("Error reading HTTP/3 request body from {}: {}", client_addr, e);
+                return;
             }
         }
-        Ok(None) => None,
-        Err(e) => {
-            debug!("Error reading HTTP/3 request body from {}: {}", client_addr, e);
-            return;
-        }
+    } else {
+        None
     };
 
     let sni_host = authority.split(':').next().unwrap_or("localhost");
@@ -480,7 +526,7 @@ async fn handle_h3_stream(
         }
     };
 
-    let is_body_empty = first_chunk.is_none();
+    let is_body_empty = is_typically_bodyless && first_chunk.is_none();
     let (response_fut, mut h2_send_stream) = match sender.send_request(h2_request, is_body_empty) {
         Ok(res) => res,
         Err(e) => {
@@ -495,40 +541,46 @@ async fn handle_h3_stream(
         }
     };
 
-    if let Some(first_bytes) = first_chunk {
+    if !is_body_empty {
         tokio::spawn(async move {
-            let mut pending = Some(first_bytes);
+            if let Some(first_bytes) = first_chunk {
+                if let Err(e) =
+                    send_h2_data_with_flow_control(&mut h2_send_stream, first_bytes, false).await
+                {
+                    debug!("Error forwarding initial request body chunk to local H2: {}", e);
+                    return;
+                }
+            }
             loop {
-                let next_chunk = match h3_recv.recv_data().await {
+                match h3_recv.recv_data().await {
                     Ok(Some(mut buf)) => {
                         let len = buf.remaining();
                         if len > 0 {
-                            Some(buf.copy_to_bytes(len))
-                        } else {
-                            None
+                            let chunk = buf.copy_to_bytes(len);
+                            if let Err(e) = send_h2_data_with_flow_control(
+                                &mut h2_send_stream,
+                                chunk,
+                                false,
+                            )
+                            .await
+                            {
+                                debug!("Error forwarding request body chunk to local H2: {}", e);
+                                return;
+                            }
                         }
                     }
-                    Ok(None) => None,
+                    Ok(None) => {
+                        if let Ok(Some(trailers)) = h3_recv.recv_trailers().await {
+                            let _ = h2_send_stream.send_trailers(trailers);
+                        } else {
+                            let _ = h2_send_stream.send_data(Bytes::new(), true);
+                        }
+                        break;
+                    }
                     Err(e) => {
                         debug!("Error streaming H3 request body: {}", e);
                         break;
                     }
-                };
-
-                if let Some(curr) = pending.take() {
-                    let is_eos = next_chunk.is_none();
-                    if let Err(e) = h2_send_stream.send_data(curr, is_eos) {
-                        debug!("Error forwarding request body chunk to local H2: {}", e);
-                        break;
-                    }
-                    if is_eos {
-                        break;
-                    }
-                }
-                pending = next_chunk;
-                if pending.is_none() {
-                    let _ = h2_send_stream.send_data(Bytes::new(), true);
-                    break;
                 }
             }
         });
@@ -588,6 +640,12 @@ async fn handle_h3_stream(
                 debug!("Failed to send HTTP/3 response body to {}: {}", client_addr, e);
                 return;
             }
+        }
+    }
+
+    if let Ok(Some(trailers)) = recv_body.trailers().await {
+        if !trailers.is_empty() {
+            let _ = h3_send.send_trailers(trailers).await;
         }
     }
 
