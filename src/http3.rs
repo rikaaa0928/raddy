@@ -189,6 +189,7 @@ impl Http3Service {
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
 
         let mut transport = quinn::TransportConfig::default();
+        transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
         transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
         transport.keep_alive_interval(Some(Duration::from_secs(15)));
         transport.receive_window(quinn::VarInt::from_u32(H2_CONNECTION_WINDOW_SIZE));
