@@ -73,6 +73,8 @@ impl rustls::server::ResolvesServerCert for DynamicQuicCertResolver {
 struct H2ClientPool {
     target_addr: String,
     is_tls: bool,
+    stream_window_size: u32,
+    connection_window_size: u32,
     tls_connector: Option<boring::ssl::SslConnector>,
     current_sender: Arc<Mutex<Option<h2::client::SendRequest<Bytes>>>>,
 }
@@ -81,6 +83,8 @@ impl H2ClientPool {
     fn new(
         target_addr: String,
         is_tls: bool,
+        stream_window_size: u32,
+        connection_window_size: u32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let tls_connector = if is_tls {
             let mut builder = boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls())?;
@@ -94,16 +98,18 @@ impl H2ClientPool {
         Ok(Self {
             target_addr,
             is_tls,
+            stream_window_size,
+            connection_window_size,
             tls_connector,
             current_sender: Arc::new(Mutex::new(None)),
         })
     }
 
-    fn h2_client_builder() -> h2::client::Builder {
+    fn h2_client_builder(&self) -> h2::client::Builder {
         let mut builder = h2::client::Builder::new();
         builder
-            .initial_window_size(H2_STREAM_WINDOW_SIZE)
-            .initial_connection_window_size(H2_CONNECTION_WINDOW_SIZE)
+            .initial_window_size(self.stream_window_size)
+            .initial_connection_window_size(self.connection_window_size)
             .max_frame_size(H2_MAX_FRAME_SIZE);
         builder
     }
@@ -121,7 +127,7 @@ impl H2ClientPool {
 
         let tcp = tokio::net::TcpStream::connect(&self.target_addr).await?;
         let _ = tcp.set_nodelay(true);
-        let h2_builder = Self::h2_client_builder();
+        let h2_builder = self.h2_client_builder();
 
         let sender = if self.is_tls {
             let connector = self.tls_connector.as_ref().expect("TLS connector present");
@@ -152,7 +158,7 @@ impl H2ClientPool {
 
 /// HTTP/3 Background Service for Pingora powered by Quinn
 pub struct Http3Service {
-    _config: Arc<Config>,
+    config: Arc<Config>,
     cert_store: Arc<CertStore>,
     listen_addr: String,
     h2_target: (String, bool),
@@ -166,7 +172,7 @@ impl Http3Service {
         h2_target: (String, bool),
     ) -> Self {
         Self {
-            _config: config,
+            config,
             cert_store,
             listen_addr,
             h2_target,
@@ -174,13 +180,15 @@ impl Http3Service {
     }
 
     fn create_quinn_server_config(
-        cert_store: Arc<CertStore>,
+        &self,
     ) -> Result<quinn::ServerConfig, Box<dyn std::error::Error + Send + Sync>> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut tls_config = rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
-            .with_cert_resolver(Arc::new(DynamicQuicCertResolver::new(cert_store)));
+            .with_cert_resolver(Arc::new(DynamicQuicCertResolver::new(
+                self.cert_store.clone(),
+            )));
 
         tls_config.alpn_protocols = vec![b"h3".to_vec()];
         tls_config.max_early_data_size = u32::MAX;
@@ -189,14 +197,57 @@ impl Http3Service {
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
 
         let mut transport = quinn::TransportConfig::default();
-        transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-        transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
-        transport.keep_alive_interval(Some(Duration::from_secs(15)));
-        transport.receive_window(quinn::VarInt::from_u32(H2_CONNECTION_WINDOW_SIZE));
-        transport.stream_receive_window(quinn::VarInt::from_u32(H2_STREAM_WINDOW_SIZE));
-        transport.send_window(u64::from(H2_CONNECTION_WINDOW_SIZE));
-        transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(256));
-        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
+        let use_bbr = self
+            .config
+            .listen
+            .http3_congestion_control
+            .as_deref()
+            .map(|s| !s.eq_ignore_ascii_case("cubic"))
+            .unwrap_or(true);
+        if use_bbr {
+            transport
+                .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        }
+
+        if let Some(idle_secs) = self
+            .config
+            .timeouts
+            .http3_max_idle_timeout_secs
+            .filter(|&s| s > 0)
+        {
+            transport.max_idle_timeout(Some(Duration::from_secs(idle_secs).try_into()?));
+        } else {
+            transport.max_idle_timeout(None);
+        }
+
+        let keep_alive = self
+            .config
+            .timeouts
+            .effective_http3_keep_alive_interval_secs()
+            .map(Duration::from_secs);
+        transport.keep_alive_interval(keep_alive);
+
+        let conn_win = self
+            .config
+            .listen
+            .http3_connection_window_size
+            .unwrap_or(H2_CONNECTION_WINDOW_SIZE);
+        let stream_win = self
+            .config
+            .listen
+            .http3_stream_window_size
+            .unwrap_or(H2_STREAM_WINDOW_SIZE);
+        let max_streams = self
+            .config
+            .listen
+            .http3_max_concurrent_streams
+            .unwrap_or(256);
+
+        transport.receive_window(quinn::VarInt::from_u32(conn_win));
+        transport.stream_receive_window(quinn::VarInt::from_u32(stream_win));
+        transport.send_window(u64::from(conn_win));
+        transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(max_streams));
+        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(max_streams));
 
         server_config.transport_config(Arc::new(transport));
         Ok(server_config)
@@ -220,7 +271,7 @@ impl BackgroundService for Http3Service {
             }
         };
 
-        let server_config = match Self::create_quinn_server_config(self.cert_store.clone()) {
+        let server_config = match self.create_quinn_server_config() {
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("Failed to initialize Quinn server config: {}", e);
@@ -244,7 +295,23 @@ impl BackgroundService for Http3Service {
             .map(|a| a.port())
             .unwrap_or_else(|_| listen_sock_addr.port());
 
-        let h2_pool = match H2ClientPool::new(self.h2_target.0.clone(), self.h2_target.1) {
+        let stream_win = self
+            .config
+            .listen
+            .http3_stream_window_size
+            .unwrap_or(H2_STREAM_WINDOW_SIZE);
+        let conn_win = self
+            .config
+            .listen
+            .http3_connection_window_size
+            .unwrap_or(H2_CONNECTION_WINDOW_SIZE);
+
+        let h2_pool = match H2ClientPool::new(
+            self.h2_target.0.clone(),
+            self.h2_target.1,
+            stream_win,
+            conn_win,
+        ) {
             Ok(pool) => pool,
             Err(e) => {
                 error!("Failed to initialize local H2 client pool: {}", e);

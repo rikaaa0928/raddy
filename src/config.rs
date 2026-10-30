@@ -39,6 +39,21 @@ pub struct TimeoutConfig {
     /// Upstream idle timeout for non-local upstream hosts.
     #[serde(default = "default_remote_upstream_idle_secs")]
     pub remote_upstream_idle_secs: Option<u64>,
+    /// HTTP/3 (QUIC) max idle timeout in seconds (defaults to 90s).
+    #[serde(
+        default = "default_http3_max_idle_timeout_secs",
+        alias = "quic_max_idle_timeout_secs"
+    )]
+    pub http3_max_idle_timeout_secs: Option<u64>,
+    /// Whether the HTTP/3 server actively sends QUIC PING keep-alives (defaults to false for mobile power saving).
+    #[serde(default = "default_http3_keep_alive", alias = "quic_keep_alive")]
+    pub http3_keep_alive: bool,
+    /// HTTP/3 server keep-alive PING interval in seconds when `http3_keep_alive` is true (defaults to 25s).
+    #[serde(
+        default = "default_http3_keep_alive_interval_secs",
+        alias = "quic_keep_alive_interval_secs"
+    )]
+    pub http3_keep_alive_interval_secs: Option<u64>,
 }
 
 impl Default for TimeoutConfig {
@@ -51,6 +66,9 @@ impl Default for TimeoutConfig {
             upstream_write_secs: None,
             local_upstream_idle_secs: default_local_upstream_idle_secs(),
             remote_upstream_idle_secs: default_remote_upstream_idle_secs(),
+            http3_max_idle_timeout_secs: default_http3_max_idle_timeout_secs(),
+            http3_keep_alive: default_http3_keep_alive(),
+            http3_keep_alive_interval_secs: default_http3_keep_alive_interval_secs(),
         }
     }
 }
@@ -80,6 +98,18 @@ pub struct ListenConfig {
     /// HTTP/2 TCP upstream target for HTTP/3 reverse proxy (e.g. "127.0.0.1:8443")
     /// Defaults to 127.0.0.1:{https_port} (via TLS) or 127.0.0.1:{http_port} (cleartext h2c)
     pub h2_target_addr: Option<String>,
+    /// HTTP/3 QUIC congestion control algorithm ("bbr" default, or "cubic")
+    #[serde(default)]
+    pub http3_congestion_control: Option<String>,
+    /// HTTP/3 maximum concurrent streams per QUIC connection (defaults to 256)
+    #[serde(default)]
+    pub http3_max_concurrent_streams: Option<u32>,
+    /// HTTP/3 initial per-stream receive window in bytes (defaults to 8 MiB)
+    #[serde(default)]
+    pub http3_stream_window_size: Option<u32>,
+    /// HTTP/3 connection-level receive/send window in bytes (defaults to 16 MiB)
+    #[serde(default)]
+    pub http3_connection_window_size: Option<u32>,
 }
 
 fn default_acme_directory() -> String {
@@ -114,12 +144,32 @@ fn default_remote_upstream_idle_secs() -> Option<u64> {
     Some(15)
 }
 
+fn default_http3_max_idle_timeout_secs() -> Option<u64> {
+    Some(90)
+}
+
+fn default_http3_keep_alive() -> bool {
+    false
+}
+
+fn default_http3_keep_alive_interval_secs() -> Option<u64> {
+    Some(25)
+}
+
 impl TimeoutConfig {
     pub fn upstream_idle_secs(&self, is_local: bool) -> Option<u64> {
         if is_local {
             self.local_upstream_idle_secs
         } else {
             self.remote_upstream_idle_secs
+        }
+    }
+
+    pub fn effective_http3_keep_alive_interval_secs(&self) -> Option<u64> {
+        if self.http3_keep_alive {
+            self.http3_keep_alive_interval_secs.filter(|&s| s > 0)
+        } else {
+            None
         }
     }
 }
@@ -588,6 +638,10 @@ upstream:
                 http3: None,
                 http3_port: None,
                 h2_target_addr: None,
+                http3_congestion_control: None,
+                http3_max_concurrent_streams: None,
+                http3_stream_window_size: None,
+                http3_connection_window_size: None,
             },
             timeouts: TimeoutConfig::default(),
             routes,
@@ -751,6 +805,9 @@ routes:
         assert_eq!(config.timeouts.upstream_write_secs, None);
         assert_eq!(config.timeouts.local_upstream_idle_secs, Some(5));
         assert_eq!(config.timeouts.remote_upstream_idle_secs, Some(15));
+        assert_eq!(config.timeouts.http3_max_idle_timeout_secs, Some(90));
+        assert!(!config.timeouts.http3_keep_alive);
+        assert_eq!(config.timeouts.effective_http3_keep_alive_interval_secs(), None);
     }
 
     #[test]
