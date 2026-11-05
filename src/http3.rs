@@ -343,8 +343,10 @@ impl BackgroundService for Http3Service {
                         };
 
                         debug!("QUIC connection established from {}", peer_addr);
+                        let mut h3_builder = h3::server::builder();
+                        h3_builder.send_grease(false);
                         let mut h3_conn: h3::server::Connection<h3_quinn::Connection, Bytes> =
-                            match h3::server::Connection::new(h3_quinn::Connection::new(quinn_conn)).await {
+                            match h3_builder.build(h3_quinn::Connection::new(quinn_conn)).await {
                                 Ok(c) => c,
                                 Err(e) => {
                                     debug!("Failed to initialize HTTP/3 connection from {}: {}", peer_addr, e);

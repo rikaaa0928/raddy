@@ -1,6 +1,6 @@
 [package]
 name = "raddy"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 license = "MIT"
 
@@ -37,3 +37,8 @@ pem = "3.0.6"
 chrono = { version = "0.4.45", features = ["serde"] }
 serde_json = "1.0.150"
 time = "0.3.51"
+
+[patch.crates-io]
+h3 = { git = "https://github.com/hyperium/h3.git", rev = "14a14224242862de31e780a7907fe8839b893fd6" }
+h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "14a14224242862de31e780a7907fe8839b893fd6" }
+
