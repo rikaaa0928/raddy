@@ -1,6 +1,6 @@
 [package]
 name = "raddy"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 license = "MIT"
 
@@ -29,7 +29,7 @@ bytes = "1.10"
 
 
 # ACME certificate management
-instant-acme = "0.8.5"
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls"] }
 arc-swap = "1.9.2"
 rcgen = { version = "0.14.8", features = ["pem"] }
 x509-parser = "0.18.1"

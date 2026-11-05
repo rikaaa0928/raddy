@@ -32,6 +32,9 @@ fn main() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Ensure rustls uses ring as the process-level CryptoProvider
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Determine configuration path
     let config_path_raw = std::env::var("RADDY_CONFIG").unwrap_or_else(|_| {
         let etc_path = "/etc/raddy/config.yaml";
@@ -284,29 +287,16 @@ fn generate_temp_cert(domains: &[String]) -> Result<CertKeyPair, Box<dyn std::er
 }
 
 fn provision_temp_cert(
-    acme_config: &acme::AcmeManagerConfig,
+    _acme_config: &acme::AcmeManagerConfig,
     domains: &[String],
     cert_store: &Arc<CertStore>,
 ) {
     info!(
-        "No valid certificate found for {:?}, will request after server starts",
+        "No valid certificate found for {:?}, using in-memory temporary certificate until ACME completes",
         domains
     );
 
     let temp_cert = generate_temp_cert(domains).expect("Failed to generate temporary certificate");
-
-    let cert_path = acme_config.target_cert_path();
-    let key_path = acme_config.target_key_path();
-
-    if let Some(parent) = std::path::Path::new(&cert_path).parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            warn!("Failed to create cert directory {:?}: {}", parent, e);
-        }
-    }
-
-    temp_cert
-        .save_to_files(&cert_path, &key_path)
-        .expect("Failed to save temporary certificate");
 
     cert_store.store_for_domains(domains, temp_cert);
 }

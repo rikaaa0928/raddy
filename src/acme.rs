@@ -110,6 +110,17 @@ impl CertKeyPair {
         Ok(domains)
     }
 
+    /// Check if certificate is self-signed (issuer == subject)
+    pub fn is_self_signed(&self) -> bool {
+        let Ok(pem_data) = pem::parse(&self.cert_pem) else {
+            return false;
+        };
+        let Ok((_, cert)) = x509_parser::parse_x509_certificate(pem_data.contents()) else {
+            return false;
+        };
+        cert.issuer() == cert.subject()
+    }
+
     /// Check if certificate covers all required domains
     pub fn covers_domains(&self, required_domains: &[String]) -> bool {
         match self.get_domains() {
@@ -447,7 +458,11 @@ impl CertificateManager {
 
     pub fn needs_certificate(&self) -> bool {
         match self.current_cert() {
-            Some(cert) => cert.needs_renewal(self.renew_before_days()),
+            Some(cert) => {
+                cert.is_self_signed()
+                    || cert.needs_renewal(self.renew_before_days())
+                    || !cert.covers_domains(&self.config.domains)
+            }
             None => true,
         }
     }
@@ -462,13 +477,29 @@ impl CertificateManager {
         if Path::new(&cert_path).exists() && Path::new(&key_path).exists() {
             match CertKeyPair::load_from_files(&cert_path, &key_path) {
                 Ok(cert_pair) => {
+                    if cert_pair.is_self_signed() {
+                        info!(
+                            "Existing certificate at {:?} is a self-signed temporary certificate, ACME issuance needed",
+                            cert_path
+                        );
+                        return Ok(None);
+                    }
+
+                    if cert_pair.expires_at <= Utc::now() {
+                        info!(
+                            "Existing certificate at {:?} has expired ({}), renewal needed",
+                            cert_path, cert_pair.expires_at
+                        );
+                        return Ok(None);
+                    }
+
                     // Check if certificate covers all configured domains
                     if !cert_pair.covers_domains(&self.config.domains) {
                         info!(
-                            "Existing certificate at {:?} does not cover all configured domains {:?}, renewal needed",
+                            "Existing certificate at {:?} does not cover all configured domains {:?}, keeping existing cert while requesting renewal in background",
                             cert_path, self.config.domains
                         );
-                        return Ok(None);
+                        return Ok(Some(cert_pair));
                     }
 
                     if !cert_pair.needs_renewal(self.config.renew_before_days) {
@@ -478,16 +509,11 @@ impl CertificateManager {
                         );
                         return Ok(Some(cert_pair));
                     } else {
-                        info!("Existing certificate needs renewal");
-                        // If certificate is still valid (not expired), load it anyway
-                        // The background task will handle the renewal
-                        if cert_pair.expires_at > Utc::now() {
-                            info!(
-                                "Loaded existing certificate from {:?} (needing renewal), expires at: {}",
-                                cert_path, cert_pair.expires_at
-                            );
-                            return Ok(Some(cert_pair));
-                        }
+                        info!(
+                            "Loaded existing certificate from {:?} (needing renewal), expires at: {}",
+                            cert_path, cert_pair.expires_at
+                        );
+                        return Ok(Some(cert_pair));
                     }
                 }
                 Err(e) => {
@@ -837,5 +863,33 @@ mod tests {
         assert_eq!(config1.target_cert_path(), "./certs/a.example.com/cert.pem");
         assert_eq!(config2.target_cert_path(), "./certs/b.example.com/cert.pem");
         assert_ne!(config1.target_cert_path(), config2.target_cert_path());
+    }
+
+    #[test]
+    fn acme_account_builder_does_not_panic_and_needs_cert_on_new_domain() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        assert!(Account::builder().is_ok());
+
+        let cert_store = Arc::new(CertStore::new());
+        let challenge_store = Arc::new(ChallengeStore::new());
+        let existing_cert = CertKeyPair {
+            expires_at: Utc::now() + Duration::days(60),
+            ..test_cert(&["a.example.com"])
+        };
+        cert_store.store_for_domains(
+            &["a.example.com".to_string(), "b.example.com".to_string()],
+            existing_cert,
+        );
+
+        let config = AcmeManagerConfig {
+            email: "admin@example.com".to_string(),
+            domains: vec!["a.example.com".to_string(), "b.example.com".to_string()],
+            directory_url: "https://example.com".to_string(),
+            cert_dir: "./certs".to_string(),
+            renew_before_days: 30,
+            staging: false,
+        };
+        let mgr = CertificateManager::new(config, cert_store, challenge_store);
+        assert!(mgr.needs_certificate());
     }
 }
